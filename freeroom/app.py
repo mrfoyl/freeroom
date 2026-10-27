@@ -1,13 +1,16 @@
 """Freeroom GUI: open a photo, develop it, enhance it with AI, save.
 
-Pipeline: linear RAW/JPEG -> Raw development tab (instant, per-pixel)
--> Enhancement tab (AI denoise + sharpen on the developed photo) -> save.
+Raw development tab: instant, per-pixel dials on the linear photo.
+Enhancement tab: AI denoise + sharpen, shown on top of the development.
+Each AI model runs at most once per photo; its result is kept and the dials
+are applied on top (see pipeline.py), so only a new photo re-runs the AI.
 """
 
 from __future__ import annotations
 
 import sys
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
@@ -32,10 +35,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import develop, engine, imageio, presets
+from . import develop, engine, imageio, pipeline, presets
 from .widgets import Histogram, PhotoView
 
 SAVE_DIR = Path.home() / "Pictures" / "freeroom"
+MAX_RESULTS = 6  # AI results kept per photo (each is a full-size float image)
 
 # Slider specs: key, label, min, max, default (slider units = value * 100), display format
 DEV_LIGHT = [
@@ -72,7 +76,8 @@ class Worker(QObject):
     """Loads the models and runs them, off the GUI thread."""
 
     progress = Signal(int, int)
-    stage = Signal(str)
+    stage = Signal(object)  # key of the stage that started
+    stage_done = Signal(object)  # key of the stage whose result is complete
     status = Signal(str)
     finished = Signal(bool, float)
     failed = Signal(str)
@@ -88,20 +93,21 @@ class Worker(QObject):
             self.models[path] = engine.Restorer(path)
         return self.models[path]
 
-    def run(self, stages: list[tuple[str, Path, np.ndarray, np.ndarray]]):
-        """Run (label, model, src, dst) stages in order. dst starts as a copy of src."""
+    def run(self, stages: list[tuple]):
+        """Run (key, label, model, src, dst) stages in order. dst starts as a copy of src."""
         try:
             t0 = time.monotonic()
-            for label, path, src, dst in stages:
+            for key, label, path, src, dst in stages:
                 model = self._model(path)
                 dst[:] = src
-                self.stage.emit(label)
+                self.stage.emit(key)
                 self.status.emit(f"{label} with {path.stem}…")
                 if not model.run(src, dst, progress=self.progress.emit, cancelled=lambda: self.cancel):
                     self.finished.emit(False, 0.0)
                     return
                 if label == "Sharpening":
                     engine.keep_detail(src, dst)
+                self.stage_done.emit(key)
             self.finished.emit(True, time.monotonic() - t0)
         except Exception as e:  # surface anything (OOM, bad model file) in the UI
             self.failed.emit(f"{type(e).__name__}: {e}")
@@ -119,15 +125,14 @@ class MainWindow(QMainWindow):
         self.photo_gen = 0  # bumped per opened photo; part of every cache key
         self.dev_params = dict(develop.DEFAULTS)
         self.enh_params = {k: SLIDER_DEFAULTS[k] / 100 for k in ENH_KEYS}
-        # Computed images, each tagged with the settings that produced it so
-        # nothing re-runs unless those settings changed.
-        self.developed: np.ndarray | None = None
-        self.developed_key: tuple | None = None
-        self.ai: np.ndarray | None = None  # denoised developed photo
-        self.ai_key: tuple | None = None
-        self.sharp: np.ndarray | None = None  # deblurred (denoised or developed) photo
-        self.sharp_key: tuple | None = None
-        self.job_keys: tuple | None = None  # (ai_key, sharp_key) of the running job
+        # AI results for the current photo, in the pipeline encoding, keyed by
+        # (photo_gen, step, model…). Development settings are not part of the
+        # key: the dials are applied on top, so results stay valid.
+        self.g = 1.0  # pipeline encoding scale for this photo
+        self.enc_orig: np.ndarray | None = None  # the photo in that encoding
+        self.results: OrderedDict[tuple, np.ndarray] = OrderedDict()
+        self.running: dict[tuple, np.ndarray] = {}  # key -> buffer being filled
+        self.started: set[tuple] = set()
         self.busy = False
         self.pending = False
         self.save_target: Path | None = None
@@ -213,6 +218,7 @@ class MainWindow(QMainWindow):
         self.start_job.connect(self.worker.run)
         self.worker.progress.connect(self.on_progress)
         self.worker.stage.connect(self.on_stage)
+        self.worker.stage_done.connect(self.on_stage_done)
         self.worker.status.connect(self.status.setText)
         self.worker.finished.connect(self.on_finished)
         self.worker.failed.connect(self.on_failed)
@@ -296,7 +302,8 @@ class MainWindow(QMainWindow):
         reset = QPushButton("Reset enhancement sliders")
         reset.clicked.connect(lambda: self._reset(ENH_KEYS))
         note = QLabel(
-            "Applied to the developed photo. <i>Defocus</i> = soft / slightly out of focus, "
+            "Each AI model runs once per photo; development and these sliders "
+            "are applied on top instantly. <i>Defocus</i> = soft / slightly out of focus, "
             "<i>Motion</i> = camera shake."
         )
         note.setStyleSheet("color: #999;")
@@ -476,87 +483,95 @@ class MainWindow(QMainWindow):
             self.pending = True
         self.photo = photo
         self.photo_gen += 1
-        self.developed = self.ai = self.sharp = None
-        self.developed_key = self.ai_key = self.sharp_key = None
+        self.g = pipeline.ai_scale(photo.linear, photo.baseline_ev)
+        self.enc_orig = None
+        self.results.clear()
+        self.running.clear()
+        self.started.clear()
         self.save_target = None
         self.save_btn.setEnabled(True)
         h, w, _ = photo.linear.shape
         kind = f"RAW, base exposure +{photo.baseline_ev:.2f} EV" if photo.meta.get("raw") else f"{photo.meta.get('bits')}-bit"
         self.setWindowTitle(f"Freeroom — {path.name} ({w}×{h}, {kind})")
-        self.view.set_linear(photo.linear, photo.baseline_ev)
+        self.view.set_linear(photo.linear, photo.baseline_ev, self.g)
         if not self.busy:
             self.update_pipeline()
 
-    def _dev_key(self) -> tuple:
-        return (self.photo_gen, *(self.dev_params[k] for k in DEV_KEYS))
+    def _keys(self) -> tuple[tuple | None, tuple | None]:
+        """Result keys the current settings need: (denoise, sharpen)."""
+        dn_model = self.denoise_box.currentData() if self.nr_group.isChecked() else None
+        sh_model = self.sharpen_box.currentData() if self.sh_group.isChecked() else None
+        dn_key = (self.photo_gen, "dn", dn_model) if dn_model is not None else None
+        sh_key = (self.photo_gen, "sh", sh_model, dn_model) if sh_model is not None else None
+        return dn_key, sh_key
 
-    def _ensure_developed(self) -> np.ndarray:
-        key = self._dev_key()
-        if self.developed_key != key:
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            try:
-                # A new array, never in place: a running job may still read the old one.
-                self.developed = develop.develop(self.photo.linear, self.dev_params, self.photo.baseline_ev)
-            finally:
-                QApplication.restoreOverrideCursor()
-            self.developed_key = key
-        return self.developed
+    def _layer(self, key: tuple | None) -> np.ndarray | None:
+        if key is None:
+            return None
+        if key in self.results:
+            self.results.move_to_end(key)
+            return self.results[key]
+        if key in self.started:
+            return self.running.get(key)  # partially filled, shown as it fills in
+        return None
 
-    def _wanted(self) -> tuple[tuple | None, tuple | None]:
-        """What the current settings need: (denoise key, sharpen key)."""
-        dk = self._dev_key()
-        ai_key = (self.denoise_box.currentData(), dk) if self.nr_group.isChecked() else None
-        sharp_model = self.sharpen_box.currentData() if self.sh_group.isChecked() else None
-        sharp_key = (sharp_model, ai_key, dk) if sharp_model is not None else None
-        return ai_key, sharp_key
+    def _show_layers(self):
+        dn_key, sh_key = self._keys()
+        self.view.set_layers(self._layer(dn_key), self._layer(sh_key))
 
     def update_pipeline(self):
-        """Bring the enhancement up to date with the settings (only when it's
-        being looked at or saved), then save if a save is waiting."""
+        """Run the AI steps the current settings need that haven't run yet for
+        this photo (only when the Enhancement tab is shown or a save waits),
+        then save if a save is waiting."""
         if self.photo is None or self.denoise_box.count() == 0:
             return
         if self.tabs.currentWidget() is not self.enh_tab and self.save_target is None:
             return
+        self._show_layers()
         if self.busy:
-            # Let the running job stop at the next tile, then come back here.
-            if self.job_keys != self._wanted():
-                self.worker.cancel = True
-                self.pending = True
+            # Let the running job finish (its result is kept), then come back here.
+            self.pending = True
             return
-        developed = self._ensure_developed()
-        ai_key, sharp_key = self._wanted()
+        dn_key, sh_key = self._keys()
         stages = []
-        if ai_key is not None and self.ai_key != ai_key:
-            # The loupe shows the developed photo until each tile is done.
-            self.ai = developed.copy()
-            self.ai_key = None
-            stages.append(("Denoising", ai_key[0], developed, self.ai))
-        base = self.ai if ai_key is not None else developed
-        if sharp_key is not None and self.sharp_key != sharp_key:
-            self.sharp = np.empty_like(base)  # filled by the worker once that stage starts
-            self.sharp_key = None
-            stages.append(("Sharpening", sharp_key[0], base, self.sharp))
-        shown_sharp = self.sharp if sharp_key is not None and self.sharp_key == sharp_key else None
-        self.view.set_enhance(developed, base, shown_sharp)
+        if dn_key is not None and dn_key not in self.results or sh_key is not None and sh_key not in self.results:
+            if self.enc_orig is None:
+                self.enc_orig = pipeline.encode(self.photo.linear, self.g)
+        if dn_key is not None and dn_key not in self.results:
+            dst = self.enc_orig.copy()  # shows the unprocessed photo until tiles land
+            self.running[dn_key] = dst
+            stages.append((dn_key, "Denoising", dn_key[2], self.enc_orig, dst))
+        if sh_key is not None and sh_key not in self.results:
+            src = self.enc_orig if dn_key is None else self.results.get(dn_key, self.running.get(dn_key))
+            dst = np.empty_like(src)  # filled by the worker once that stage starts
+            self.running[sh_key] = dst
+            stages.append((sh_key, "Sharpening", sh_key[2], src, dst))
 
         if not stages:
             if self.save_target is not None:
-                self._do_save(developed, base, shown_sharp)
+                self._do_save()
             return
-        self.job_keys = (ai_key, sharp_key)
         self.worker.cancel = False
         self.busy = True
         self.progress.setValue(0)
         self.progress.show()
         self.refresh.start()
+        self._show_layers()
         self.start_job.emit(stages)
 
-    def on_stage(self, label: str):
-        if label == "Sharpening":
-            ai_key, _ = self.job_keys
-            if ai_key is not None:
-                self.ai_key = ai_key  # denoise stage finished
-            self.view.set_sharp(self.sharp)
+    def on_stage(self, key: tuple):
+        self.started.add(key)
+        self._show_layers()
+
+    def on_stage_done(self, key: tuple):
+        dst = self.running.pop(key, None)
+        self.started.discard(key)
+        if dst is None or key[0] != self.photo_gen:
+            return  # from a photo that has since been closed
+        self.results[key] = dst
+        while len(self.results) > MAX_RESULTS:
+            self.results.popitem(last=False)
+        self._show_layers()
 
     def on_progress(self, done: int, total: int):
         self.progress.setMaximum(total)
@@ -567,18 +582,15 @@ class MainWindow(QMainWindow):
         self.busy = False
         self.refresh.stop()
         self.progress.hide()
-        self.view.ai_updated()
+        self.running.clear()
+        self.started.clear()
 
     def on_finished(self, ok: bool, seconds: float):
         self._job_ended()
         if ok:
-            ai_key, sharp_key = self.job_keys
-            if ai_key is not None:
-                self.ai_key = ai_key
-            if sharp_key is not None:
-                self.sharp_key = sharp_key
             self.status.setText(f"Done in {seconds:.1f} s · {engine.device_name()}")
         self.pending = False
+        self._show_layers()
         self.update_pipeline()
 
     def on_failed(self, msg: str):
@@ -613,11 +625,20 @@ class MainWindow(QMainWindow):
         self.status.setText("Preparing full-size image for saving…")
         self.update_pipeline()
 
-    def _do_save(self, developed: np.ndarray, base: np.ndarray, sharp: np.ndarray | None):
+    def _do_save(self):
         out, self.save_target = self.save_target, None
+        dn_key, sh_key = self._keys()
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            rgb = engine.adjust(developed, base, sharp, **self.effective_enh())
+            rgb = pipeline.compose(
+                self.photo.linear,
+                self.results.get(dn_key),
+                self.results.get(sh_key),
+                self.g,
+                self.dev_params,
+                self.photo.baseline_ev,
+                self.effective_enh(),
+            )
             saved = imageio.save(self.photo, rgb, out)
         except Exception as e:
             QMessageBox.warning(self, "Could not save", str(e))

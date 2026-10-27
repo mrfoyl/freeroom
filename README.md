@@ -9,8 +9,15 @@ Two tabs, applied in this order:
    tint, saturation. RAW files load scene-linear (rawpy, camera WB) with an
    automatic base exposure; Highlights left rolls RAW data past white back
    into range. Per-pixel only, so it's instant. A JPEG at defaults is unchanged.
-2. **Enhancement**: the AI steps below, run on the developed photo when you
-   open the tab (or save). Each section can be switched off.
+2. **Enhancement**: the AI steps below, shown on top of the development.
+   Each section can be switched off.
+
+Each AI model runs **at most once per photo** (when you first view it on the
+Enhancement tab, or on save). The models work on a fixed encoding of the
+linear photo, not on the developed one, so their results are kept and the
+dials are applied on top afterwards: changing development, switching tabs,
+toggling sections or going back to a model you already tried is instant.
+Only a new photo (or a model not yet tried on this one) runs the AI again.
 
 The RGB range view (histogram) above the tabs shows the current result, with
 clip markers and a note when a RAW has highlight data past white.
@@ -47,7 +54,7 @@ Loupe = 100% (1 photo px = 1 screen px). Hold mouse = original in loupe,
 hold Space = original everywhere, scroll = loupe size.
 
 Pipeline: denoise model → optional AI sharpen (deblur) model on the denoised
-result. Each runs once per photo (RTX 4080, bf16, 512 px tiles: 12 MP ≈ 4 s
+result, both in the AI encoding (`pipeline.py`). Each runs once per photo (RTX 4080, bf16, 512 px tiles: 12 MP ≈ 4 s
 denoise + 9 s sharpen; 26 MP ≈ 9 s + 19 s). Of the deblur output only the
 fine detail is kept (high-pass, σ=6) so it can't shift tones/colours.
 

@@ -8,7 +8,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
-from . import develop, engine
+from . import develop, pipeline
 
 
 def to_qimage(rgb: np.ndarray, dpr: float = 1.0) -> QImage:
@@ -22,10 +22,11 @@ def to_qimage(rgb: np.ndarray, dpr: float = 1.0) -> QImage:
 class PhotoView(QWidget):
     """Fit-to-window preview with a circular 100% loupe under the mouse.
 
+    Everything is rendered on the fly from the linear photo (+ the AI layers,
+    which are stored in the pipeline encoding), so dials are always instant.
     Two modes, one per tab:
-      "develop": developed RAW, computed on the fly from linear data
-                 (original = default development)
-      "enhance": developed photo + AI enhancement (original = developed photo)
+      "develop": developed photo (before = default development)
+      "enhance": developed photo + AI layers (before = developed photo)
     """
 
     rendered = Signal(object)  # screen-size result, for the histogram
@@ -36,16 +37,14 @@ class PhotoView(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMinimumSize(400, 300)
         self.mode = "develop"
-        # develop mode
         self.linear: np.ndarray | None = None
         self.baseline_ev = 0.0
+        self.g = 1.0  # pipeline encoding scale of the AI layers
+        self.dn: np.ndarray | None = None  # denoised, encoded
+        self.sharp: np.ndarray | None = None  # sharpened, encoded
         self.dev_params = dict(develop.DEFAULTS)
-        self._lut = self._default_lut = develop.build_lut(develop.DEFAULTS)
-        # enhance mode
-        self.orig: np.ndarray | None = None  # developed
-        self.ai: np.ndarray | None = None
-        self.sharp: np.ndarray | None = None
         self.enh_params: dict = {}
+        self._lut = self._default_lut = develop.build_lut(develop.DEFAULTS)
         # view state
         self.radius = 160
         self.mouse: QPointF | None = None
@@ -57,30 +56,22 @@ class PhotoView(QWidget):
         self._rect = QRectF()
 
     # --- data -----------------------------------------------------------
-    def set_linear(self, linear: np.ndarray, baseline_ev: float):
-        self.linear, self.baseline_ev = linear, baseline_ev
-        self.orig = self.ai = self.sharp = None
+    def set_linear(self, linear: np.ndarray, baseline_ev: float, g: float):
+        self.linear, self.baseline_ev, self.g = linear, baseline_ev, g
+        self.dn = self.sharp = None
         self._small = {}
         self._rebuild_small()
 
     def set_dev_params(self, params: dict):
         self.dev_params = dict(params)
         self._lut = develop.build_lut(params)
-        if self.mode == "develop":
-            self._render_view()
+        self._render_view()
 
-    def set_enhance(self, orig: np.ndarray, ai: np.ndarray, sharp: np.ndarray | None):
-        self.orig, self.ai, self.sharp = orig, ai, sharp
-        for k in ("orig", "ai", "sharp"):
-            self._small.pop(k, None)
-        if self.mode == "enhance":
-            self._rebuild_small()
-
-    def set_sharp(self, sharp: np.ndarray | None):
-        self.sharp = sharp
-        self._small.pop("sharp", None)
-        if self.mode == "enhance":
-            self._rebuild_small()
+    def set_layers(self, dn: np.ndarray | None, sharp: np.ndarray | None):
+        if dn is self.dn and sharp is self.sharp:
+            return
+        self.dn, self.sharp = dn, sharp
+        self.ai_updated()
 
     def set_enh_params(self, params: dict):
         self.enh_params = dict(params)
@@ -92,8 +83,8 @@ class PhotoView(QWidget):
         self._rebuild_small()
 
     def ai_updated(self):
-        """The worker filled more tiles into ai/sharp."""
-        self._small.pop("ai", None)
+        """The AI layers changed (or the worker filled in more tiles)."""
+        self._small.pop("dn", None)
         self._small.pop("sharp", None)
         if self.mode == "enhance":
             self._rebuild_small()
@@ -101,9 +92,6 @@ class PhotoView(QWidget):
     def proxy_linear(self) -> np.ndarray | None:
         """The screen-size linear photo (cheap stand-in for statistics)."""
         return self._small.get("linear")
-
-    def _enhance_ready(self) -> bool:
-        return self.mode == "enhance" and self.orig is not None and self.ai is not None
 
     def _target_rect(self) -> QRectF:
         h, w, _ = self.linear.shape
@@ -125,33 +113,36 @@ class PhotoView(QWidget):
                 self._small[name] = cv2.resize(arr, size, interpolation=cv2.INTER_AREA)
 
         small("linear", self.linear)
-        if self._enhance_ready():
-            small("orig", self.orig)
-            small("ai", self.ai)
+        if self.mode == "enhance":
+            small("dn", self.dn)
             small("sharp", self.sharp)
         self._render_view()
+
+    def _render(self, lin, dn, sharp, original: bool) -> np.ndarray:
+        """Render one region (proxy or loupe crop) in the current mode."""
+        if self.mode == "enhance":
+            if original:
+                return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut)
+            return pipeline.compose(
+                lin, dn, sharp, self.g, self.dev_params, self.baseline_ev, self.enh_params, self._lut
+            )
+        if original:
+            return develop.develop(lin, develop.DEFAULTS, self.baseline_ev, self._default_lut)
+        return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut)
 
     def _render_view(self):
         if "linear" not in self._small:
             return
-        dpr = self.devicePixelRatioF()
-        if self._enhance_ready() and "orig" in self._small:
-            out = engine.adjust(
-                self._small["orig"], self._small["ai"], self._small.get("sharp"), **self.enh_params
-            )
-        else:
-            out = develop.develop(self._small["linear"], self.dev_params, self.baseline_ev, self._lut)
-        self._view_img = to_qimage(out, dpr)
+        sm = self._small
+        out = self._render(sm["linear"], sm.get("dn"), sm.get("sharp"), original=False)
+        self._view_img = to_qimage(out, self.devicePixelRatioF())
         self._view_orig = None  # made on demand
         self.rendered.emit(out)
         self.update()
 
     def _original_image(self) -> QImage:
         if self._view_orig is None:
-            if self._enhance_ready() and "orig" in self._small:
-                before = self._small["orig"]
-            else:
-                before = develop.develop(self._small["linear"], develop.DEFAULTS, self.baseline_ev, self._default_lut)
+            before = self._render(self._small["linear"], None, None, original=True)
             self._view_orig = to_qimage(before, self.devicePixelRatioF())
         return self._view_orig
 
@@ -170,19 +161,6 @@ class PhotoView(QWidget):
         if self.mouse is not None and self._rect.contains(self.mouse):
             self._paint_loupe(p)
 
-    def _loupe_crop(self, y0, y1, x0, x1, m, original: bool) -> np.ndarray:
-        """Rendered pixels for [y0:y1, x0:x1] (already including margin m)."""
-        if self._enhance_ready():
-            o = self.orig[y0:y1, x0:x1]
-            if original:
-                return o
-            sh = None if self.sharp is None else self.sharp[y0:y1, x0:x1]
-            return engine.adjust(o, self.ai[y0:y1, x0:x1], sh, **self.enh_params)
-        lin = self.linear[y0:y1, x0:x1]
-        if original:
-            return develop.develop(lin, develop.DEFAULTS, self.baseline_ev, self._default_lut)
-        return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut)
-
     def _paint_loupe(self, p: QPainter):
         dpr = self.devicePixelRatioF()
         h, w, _ = self.linear.shape
@@ -197,7 +175,13 @@ class PhotoView(QWidget):
         ex0, ey0, ex1, ey1 = max(x0 - m, 0), max(y0 - m, 0), min(x1 + m, w), min(y1 + m, h)
         ix0, iy0, ix1, iy1 = max(x0, 0), max(y0, 0), min(x1, w), min(y1, h)
         original = self.show_orig_loupe or self.show_orig_all
-        crop = self._loupe_crop(ey0, ey1, ex0, ex1, m, original)
+        region = np.s_[ey0:ey1, ex0:ex1]
+        crop = self._render(
+            self.linear[region],
+            None if self.dn is None else self.dn[region],
+            None if self.sharp is None else self.sharp[region],
+            original,
+        )
         crop = crop[iy0 - ey0 : iy1 - ey0, ix0 - ex0 : ix1 - ex0]
         if crop.size == 0:
             return
