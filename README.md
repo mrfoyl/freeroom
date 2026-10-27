@@ -19,6 +19,26 @@ Presets (all settings of both tabs) are JSON files in
 `~/.config/freeroom/presets/`. Saving works from either tab; it runs any
 missing enhancement first.
 
+## Requirements
+
+Only tested on Bazzite (Fedora-based) with an RTX 4080 and NVIDIA driver 615.
+Freeroom runs inside a Fedora distrobox, so the host distro matters little.
+The host needs:
+
+- **distrobox** with podman or docker (Fedora, Bazzite/Silverblue, Ubuntu,
+  Arch, … all work)
+- **x86_64** (the CUDA PyTorch and rawpy wheels are x86_64; no ARM)
+- **NVIDIA GPU with the proprietary driver ≥ 570** (CUDA 12.8 PyTorch build;
+  GPU access via `distrobox create --nvidia`)
+- **≥ 4 GB VRAM** to be safe (each AI step uses ~1.3–3 GB)
+- **Wayland or X11 desktop** (KDE, GNOME, …)
+
+Without an NVIDIA GPU it falls back to the CPU: the Raw development tab is
+still instant, but the AI steps take minutes per photo instead of seconds.
+AMD GPUs would need the ROCm PyTorch build instead (untested).
+
+## Usage
+
 - Setup (on the Bazzite host, re-runnable): `./setup/create-distrobox.sh`
 - Run: app menu → **Freeroom**, or `./freeroom.sh [photo]`
 - Smoke test: `distrobox enter freeroom -- bash -lc 'cd ~/github_projects_workspace/freeroom && ~/.local/bin/uv run --no-sync python tests/smoke.py'`
