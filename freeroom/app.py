@@ -16,6 +16,7 @@ from typing import Callable
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -39,6 +40,7 @@ from . import develop, engine, imageio, pipeline, presets
 from .widgets import Histogram, PhotoView
 
 SAVE_DIR = Path.home() / "Pictures" / "freeroom"
+ICON = Path(__file__).resolve().parent / "assets" / "freeroom.png"  # optional, gitignored
 MAX_RESULTS = 6  # AI results kept per photo (each is a full-size float image)
 
 # Slider specs: key, label, min, max, default (slider units = value * 100), display format
@@ -668,6 +670,8 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Freeroom")
     app.setDesktopFileName("freeroom")
+    if ICON.exists():  # local only, not in the repo
+        app.setWindowIcon(QIcon(str(ICON)))
     win = MainWindow()
     win.show()
     if len(sys.argv) > 1:
