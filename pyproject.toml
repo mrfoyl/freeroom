@@ -1,0 +1,30 @@
+[project]
+name = "freeroom"
+version = "0.1.0"
+description = "Local GPU AI photo noise reduction with a 100% loupe preview."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch==2.8.*",
+    "spandrel>=0.4",
+    "spandrel-extra-arches>=0.2",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.10",
+    "pillow>=10.4",
+    "rawpy>=0.22",
+    "PySide6>=6.7",
+]
+
+[project.scripts]
+freeroom = "freeroom.app:main"
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

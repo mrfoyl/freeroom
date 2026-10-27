@@ -1,0 +1,5 @@
+models/**/*.part
+models/**/*.pth
+__pycache__/
+tests/out/
+.venv/
