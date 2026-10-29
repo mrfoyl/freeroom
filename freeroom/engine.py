@@ -1,5 +1,5 @@
 """AI denoising + AI sharpening on the GPU (tiled), and the cheap slider
-adjustments on top.
+adjustments on top. GPU = NVIDIA (CUDA) or Apple Silicon (Metal), else CPU.
 
 Each model runs once per photo: denoise first, then the optional deblur model
 on the denoised result (deblurring a noisy image just amplifies the noise).
@@ -8,12 +8,16 @@ The sliders only blend the model outputs, so moving them is instant.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable
 
 import cv2
 import numpy as np
-import torch
+
+# Apple GPU: run the few ops Metal lacks on the CPU instead of failing (must be set before torch loads)
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+import torch  # noqa: E402
 
 MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 MODEL_EXTS = {".pth", ".pt", ".safetensors", ".ckpt"}
@@ -44,10 +48,21 @@ def pretty_name(path: Path) -> str:
     return names.get(path.stem, path.stem)
 
 
-def device_name() -> str:
+def _device() -> torch.device:
     if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def device_name() -> str:
+    dev = _device()
+    if dev.type == "cuda":
         return torch.cuda.get_device_name(0)
-    return "CPU (no CUDA GPU found, will be slow)"
+    if dev.type == "mps":
+        return "Apple GPU (Metal)"
+    return "CPU (no GPU found, will be slow)"
 
 
 class Restorer:
@@ -57,7 +72,7 @@ class Restorer:
 
         spandrel_extra_arches.install(ignore_duplicates=True)
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = _device()
         desc = ModelLoader().load_from_file(str(model_path))
         if desc.input_channels != 3 or desc.output_channels != 3 or desc.scale != 1:
             raise ValueError(
@@ -65,7 +80,7 @@ class Restorer:
                 f"(in={desc.input_channels}, out={desc.output_channels}, scale={desc.scale})"
             )
         self.desc = desc.to(self.device).eval()
-        self.dtype = torch.float32
+        self.dtype = torch.float32  # also on Metal: half precision there is less proven
         if self.device.type == "cuda" and desc.supports_bfloat16:
             self.dtype = torch.bfloat16
         elif self.device.type == "cuda" and desc.supports_half:
@@ -130,8 +145,10 @@ class Restorer:
 
     def close(self):
         del self.desc
-        if torch.cuda.is_available():
+        if self.device.type == "cuda":
             torch.cuda.empty_cache()
+        elif self.device.type == "mps":
+            torch.mps.empty_cache()
 
 
 def keep_detail(base: np.ndarray, sharp: np.ndarray, sigma: float = 6.0) -> None:

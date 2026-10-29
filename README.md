@@ -42,8 +42,10 @@ missing enhancement first.
 Tested on Bazzite (Fedora-based) with an RTX 4080 and NVIDIA driver 615 (in
 the distrobox), and natively on Debian 13 without an NVIDIA GPU (CPU build).
 
-- **x86_64** (the PyTorch and rawpy wheels used are x86_64; no ARM)
-- **Wayland or X11 desktop** (KDE, GNOME, …)
+- Linux: **x86_64** (the PyTorch and rawpy wheels used are x86_64; no ARM)
+  and a **Wayland or X11 desktop** (KDE, GNOME, …)
+- macOS (untested so far): **Apple Silicon** (M1 or newer; PyTorch 2.8 has no
+  Intel Mac build) and **macOS 14 Sonoma or newer** (PySide6 6.12)
 - Optional: **distrobox** with podman or docker. If it's installed, Freeroom
   goes in its own Fedora box and the host distro matters little; otherwise it
   installs natively (uv brings its own Python 3.12).
@@ -55,6 +57,13 @@ otherwise the CPU build (~1.7 GB environment instead of ~7 GB). On the CPU the
 Raw and B&W tabs (HDR included) are still instant, but the AI steps take minutes to hours
 per photo instead of seconds. AMD GPUs would need the ROCm PyTorch build
 instead (untested).
+
+On a Mac the installer always installs natively with the `cpu` extra, which
+there is the standard macOS PyTorch: the AI steps run on the Apple GPU through
+Metal (in float32; ops Metal lacks fall back to the CPU). It also creates
+`~/Applications/Freeroom.app`, which runs `freeroom.sh`; open photos with
+Open… or by dropping them on the window (the app doesn't get Finder's
+"Open with").
 
 ## Usage
 

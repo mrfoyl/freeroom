@@ -9,6 +9,9 @@
 #
 # PyTorch: CUDA 12.8 build when an NVIDIA GPU is found (nvidia-smi), otherwise
 # the much smaller CPU build. The choice is saved in .install for freeroom.sh.
+#
+# macOS (Apple Silicon only): always native; the "cpu" build there is the
+# standard macOS PyTorch, which uses the Apple GPU through Metal.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,6 +27,20 @@ for arg in "$@"; do
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
+
+if [ "$(uname -s)" = Darwin ]; then
+  if [ "$(uname -m)" != arm64 ]; then
+    echo "Intel Macs aren't supported: PyTorch 2.8 is only built for Apple Silicon (M1 or newer)." >&2
+    exit 1
+  fi
+  if [ "$MODE" = box ] || [ "$EXTRA" = cu128 ]; then
+    echo "On macOS only a native install with the Metal (cpu) build is possible." >&2
+    exit 2
+  fi
+  MODE=native
+  EXTRA=cpu
+  echo "Apple Silicon Mac: PyTorch with Metal GPU support."
+fi
 
 if [ -z "$EXTRA" ]; then
   if command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then
@@ -47,9 +64,10 @@ SYNC="command -v uv >/dev/null || [ -x \$HOME/.local/bin/uv ] || curl -LsSf http
 if [ "$MODE" = box ]; then
   if ! distrobox list | awk -F'|' '{gsub(/ /,"",$2); print $2}' | grep -qx "$BOX"; then
     echo "Creating distrobox '$BOX'…"
-    NV=()
-    [ "$EXTRA" = cu128 ] && NV=(--nvidia)
-    distrobox create --name "$BOX" --image registry.fedoraproject.org/fedora-toolbox:latest "${NV[@]}" --yes
+    NV=""
+    [ "$EXTRA" = cu128 ] && NV=--nvidia
+    # shellcheck disable=SC2086  # NV is empty or one flag
+    distrobox create --name "$BOX" --image registry.fedoraproject.org/fedora-toolbox:latest $NV --yes
   fi
   echo "Installing Qt runtime libs inside the box…"
   # The pip PySide6 wheel brings Qt itself; these pull in the X11/Wayland/GL
@@ -58,15 +76,19 @@ if [ "$MODE" = box ]; then
     qt6-qtbase-gui qt6-qtwayland xcb-util-cursor mesa-libGL mesa-libEGL curl
   echo "Installing uv + Python deps…"
   distrobox enter "$BOX" -- bash -lc "$SYNC"
+  UV='~/.local/bin/uv'  # inside the box
 else
   echo "Installing uv + Python deps…"
   bash -lc "$SYNC"
+  # wherever uv is (~/.local/bin, Homebrew…): app launchers get a minimal PATH
+  UV="$(bash -lc 'export PATH=$HOME/.local/bin:$PATH; command -v uv')"
 fi
 
-printf 'mode=%s\nbox=%s\nextra=%s\n' "$MODE" "$BOX" "$EXTRA" > "$HERE/.install"
+printf 'mode=%s\nbox=%s\nextra=%s\nuv=%s\n' "$MODE" "$BOX" "$EXTRA" "$UV" > "$HERE/.install"
 
 "$HERE/setup/download-models.sh"
 "$HERE/setup/install-launcher.sh"
 
 echo
-echo "Done. Start it from the app menu (Freeroom) or: $HERE/freeroom.sh [photo]"
+if [ "$(uname -s)" = Darwin ]; then WHERE="~/Applications (Freeroom)"; else WHERE="the app menu (Freeroom)"; fi
+echo "Done. Start it from $WHERE or: $HERE/freeroom.sh [photo]"
