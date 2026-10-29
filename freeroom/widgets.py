@@ -1,11 +1,11 @@
-"""Photo view with the 100% loupe, the RGB range view (histogram), and sliders."""
+"""Photo view with the 100% loupe and crop tool, the RGB range view (histogram), and sliders."""
 
 from __future__ import annotations
 
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QLabel, QProgressBar, QSlider, QVBoxLayout, QWidget
 
 from . import develop, pipeline
@@ -52,11 +52,20 @@ class PhotoView(QWidget):
     Two modes, one per tab:
       "develop": developed photo (before = default development)
       "enhance": developed photo + AI layers (before = developed photo)
+
+    Crop: `crop` = (x0, y0, x1, y1) in photo pixels, or None. In crop mode the
+    whole photo is shown with the crop frame to edit; otherwise only the
+    cropped part is shown (and the loupe stays inside it).
     """
 
     # screen-size result, its histogram, fraction of RAW data past white (develop mode)
     rendered = Signal(object, object, float)
+    crop_changed = Signal(object)  # (x0, y0, x1, y1) or None
+    crop_finished = Signal(bool)  # True = keep (Enter), False = cancel (Esc)
     _request = Signal(object)
+
+    HANDLE = 9  # px: grab distance of the crop handles
+    MIN_CROP = 16  # photo px
 
     def __init__(self):
         super().__init__()
@@ -82,6 +91,11 @@ class PhotoView(QWidget):
         self._view_img: QImage | None = None
         self._view_orig: QImage | None = None
         self._rect = QRectF()
+        # crop
+        self.crop: tuple[int, int, int, int] | None = None
+        self.crop_mode = False
+        self.crop_aspect: float | None = None  # width / height, None = free
+        self._drag: tuple | None = None  # (kind, start photo point, start crop)
         # Loading overlay in the middle of the view (busy bar: decoders don't report progress)
         self._loading = QWidget(self)
         self._loading_text = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
@@ -142,8 +156,125 @@ class PhotoView(QWidget):
         self.linear, self.baseline_ev, self.g = linear, baseline_ev, g
         self.dn = self.sharp = None
         self._hdr_map = None
+        self.crop = None
+        self.crop_changed.emit(None)
         self._small = {}
         self._rebuild_small()
+
+    # --- crop -------------------------------------------------------------
+    def set_crop_mode(self, on: bool):
+        self.crop_mode = on
+        self._drag = None
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._small = {}  # the shown region changes
+        self._rebuild_small()
+
+    def set_crop(self, crop: tuple | None):
+        if crop is not None:
+            h, w, _ = self.linear.shape
+            x0, y0, x1, y1 = (int(round(v)) for v in crop)
+            x0, x1 = sorted((min(max(x0, 0), w), min(max(x1, 0), w)))
+            y0, y1 = sorted((min(max(y0, 0), h), min(max(y1, 0), h)))
+            crop = None if (x0, y0, x1, y1) == (0, 0, w, h) else (x0, y0, x1, y1)
+        self.crop = crop
+        self.crop_changed.emit(crop)
+        if self.crop_mode:
+            self.update()
+        else:
+            self._small = {}
+            self._rebuild_small()
+
+    def set_crop_aspect(self, aspect: float | None):
+        """Constrain the crop to width/height = aspect (None = free); the current
+        crop keeps its centre and roughly its area."""
+        self.crop_aspect = aspect
+        if aspect is None or self.linear is None:
+            return
+        h, w, _ = self.linear.shape
+        x0, y0, x1, y1 = self.crop or (0, 0, w, h)
+        cx, cy, area = (x0 + x1) / 2, (y0 + y1) / 2, (x1 - x0) * (y1 - y0)
+        cw = np.sqrt(area * aspect)
+        ch = cw / aspect
+        k = min(1.0, w / cw, h / ch)  # shrink to fit the photo
+        cw, ch = cw * k, ch * k
+        cx = min(max(cx, cw / 2), w - cw / 2)
+        cy = min(max(cy, ch / 2), h - ch / 2)
+        self.set_crop((cx - cw / 2, cy - ch / 2, cx + cw / 2, cy + ch / 2))
+
+    def _region(self) -> tuple[int, int, int, int]:
+        """Part of the photo shown: everything in crop mode, else the crop."""
+        h, w, _ = self.linear.shape
+        if self.crop_mode or self.crop is None:
+            return (0, 0, w, h)
+        return self.crop
+
+    def _to_photo(self, pt: QPointF) -> tuple[float, float]:
+        x0, y0, x1, y1 = self._region()
+        return (x0 + (pt.x() - self._rect.x()) / self._rect.width() * (x1 - x0),
+                y0 + (pt.y() - self._rect.y()) / self._rect.height() * (y1 - y0))
+
+    def _to_widget(self, x: float, y: float) -> QPointF:
+        x0, y0, x1, y1 = self._region()
+        return QPointF(self._rect.x() + (x - x0) / (x1 - x0) * self._rect.width(),
+                       self._rect.y() + (y - y0) / (y1 - y0) * self._rect.height())
+
+    def _crop_box(self) -> tuple[int, int, int, int]:
+        h, w, _ = self.linear.shape
+        return self.crop or (0, 0, w, h)
+
+    def _hit(self, pt: QPointF) -> str | None:
+        """Which part of the crop frame is under pt: corner/edge (n, s, e, w,
+        ne, …), 'move' inside, None outside."""
+        x0, y0, x1, y1 = self._crop_box()
+        a, b = self._to_widget(x0, y0), self._to_widget(x1, y1)
+        near = lambda u, v: abs(u - v) <= self.HANDLE  # noqa: E731
+        inside_x = a.x() - self.HANDLE <= pt.x() <= b.x() + self.HANDLE
+        inside_y = a.y() - self.HANDLE <= pt.y() <= b.y() + self.HANDLE
+        if not (inside_x and inside_y):
+            return None
+        v = "n" if near(pt.y(), a.y()) else "s" if near(pt.y(), b.y()) else ""
+        h = "w" if near(pt.x(), a.x()) else "e" if near(pt.x(), b.x()) else ""
+        return (v + h) or ("move" if a.x() < pt.x() < b.x() and a.y() < pt.y() < b.y() else None)
+
+    def _drag_crop(self, pt: QPointF):
+        kind, (sx, sy), (x0, y0, x1, y1) = self._drag
+        h, w, _ = self.linear.shape
+        px, py = self._to_photo(pt)
+        px, py = min(max(px, 0), w), min(max(py, 0), h)
+        if kind == "move":
+            dx = min(max(px - sx, -x0), w - x1)
+            dy = min(max(py - sy, -y0), h - y1)
+            self.set_crop((x0 + dx, y0 + dy, x1 + dx, y1 + dy))
+            return
+        if kind == "new":
+            ax, ay, kind = sx, sy, ("s" if py >= sy else "n") + ("e" if px >= sx else "w")
+        else:
+            # anchor = the opposite side / corner
+            ax = x1 if "w" in kind else x0
+            ay = y1 if "n" in kind else y0
+        a = self.crop_aspect
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        # size the frame wants, and the room it has from its anchor
+        if kind in ("e", "w"):  # one edge: width follows the mouse, height the aspect
+            cw, ch = abs(px - ax), (ch0 := y1 - y0)
+            room_w, room_h = (ax if kind == "w" else w - ax), 2 * min(cy, h - cy)
+            ch = cw / a if a else ch0
+        elif kind in ("n", "s"):
+            cw, ch = (cw0 := x1 - x0), abs(py - ay)
+            room_w, room_h = 2 * min(cx, w - cx), (ay if kind == "n" else h - ay)
+            cw = ch * a if a else cw0
+        else:  # a corner, or drawing a new frame
+            cw, ch = abs(px - ax), abs(py - ay)
+            if a:
+                cw, ch = (ch * a, ch) if cw < ch * a else (cw, cw / a)
+            room_w, room_h = (ax if "w" in kind else w - ax), (ay if "n" in kind else h - ay)
+        k = min(1.0, room_w / max(cw, 1e-9), room_h / max(ch, 1e-9))
+        cw, ch = cw * k, ch * k
+        bx = (ax - cw if "w" in kind else ax) if kind not in ("n", "s") else cx - cw / 2
+        by = (ay - ch if "n" in kind else ay) if kind not in ("e", "w") else cy - ch / 2
+        box = [bx, by, bx + cw, by + ch]
+        if box[2] - box[0] >= self.MIN_CROP and box[3] - box[1] >= self.MIN_CROP:
+            self.set_crop(box)
 
     def set_dev_params(self, params: dict):
         self.dev_params = dict(params)
@@ -173,7 +304,8 @@ class PhotoView(QWidget):
             self._rebuild_small()
 
     def _target_rect(self) -> QRectF:
-        h, w, _ = self.linear.shape
+        x0, y0, x1, y1 = self._region()
+        w, h = x1 - x0, y1 - y0
         s = min(self.width() / w, self.height() / h)
         dw, dh = w * s, h * s
         return QRectF((self.width() - dw) / 2, (self.height() - dh) / 2, dw, dh)
@@ -184,12 +316,14 @@ class PhotoView(QWidget):
         self._rect = self._target_rect()
         dpr = self.devicePixelRatioF()
         size = (max(1, round(self._rect.width() * dpr)), max(1, round(self._rect.height() * dpr)))
-        if self._small.get("size") != size:
-            self._small = {"size": size}
+        region = self._region()
+        if self._small.get("size") != size or self._small.get("region") != region:
+            self._small = {"size": size, "region": region}
+        x0, y0, x1, y1 = region
 
         def small(name: str, arr: np.ndarray | None):
             if arr is not None and self._small.get(name) is None:
-                self._small[name] = cv2.resize(arr, size, interpolation=cv2.INTER_AREA)
+                self._small[name] = cv2.resize(arr[y0:y1, x0:x1], size, interpolation=cv2.INTER_AREA)
 
         small("linear", self.linear)
         if self.mode == "enhance":
@@ -229,8 +363,10 @@ class PhotoView(QWidget):
         self._rendering = True
         sm = dict(self._small)
         lin, dn, sharp = sm["linear"], sm.get("dn"), sm.get("sharp")
+        x0, y0, x1, y1 = sm["region"]
         bw = (lin, dict(self.dev_params), self.baseline_ev) if self.mode == "develop" else None
-        self._request.emit((lambda: self._render(lin, dn, sharp, original=False), self.devicePixelRatioF(), bw))
+        self._request.emit((lambda: self._render(lin, dn, sharp, False, (y0, x0, y1, x1)),
+                            self.devicePixelRatioF(), bw))
 
     def _render_done(self, img: QImage, out: np.ndarray, hist, beyond_white: float):
         self._rendering = False
@@ -243,7 +379,8 @@ class PhotoView(QWidget):
 
     def _original_image(self) -> QImage:
         if self._view_orig is None:
-            before = self._render(self._small["linear"], None, None, original=True)
+            x0, y0, x1, y1 = self._small["region"]
+            before = self._render(self._small["linear"], None, None, True, (y0, x0, y1, x1))
             self._view_orig = to_qimage(before, self.devicePixelRatioF())
         return self._view_orig
 
@@ -262,22 +399,47 @@ class PhotoView(QWidget):
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Open a photo (Ctrl+O) or drop one here")
             return
         p.drawImage(self._rect.topLeft(), self._original_image() if self.show_orig_all else self._view_img)
-        if self.mouse is not None and self._rect.contains(self.mouse):
+        if self.crop_mode:
+            self._paint_crop(p)
+        elif self.mouse is not None and self._rect.contains(self.mouse):
             self._paint_loupe(p)
+
+    def _paint_crop(self, p: QPainter):
+        x0, y0, x1, y1 = self._crop_box()
+        box = QRectF(self._to_widget(x0, y0), self._to_widget(x1, y1))
+        outside = QPainterPath()
+        outside.addRect(self._rect)
+        inner = QPainterPath()
+        inner.addRect(box)
+        p.fillPath(outside.subtracted(inner), QColor(0, 0, 0, 150))
+        p.setPen(QPen(QColor(255, 255, 255, 90), 1))
+        for i in (1, 2):  # rule of thirds
+            x = box.left() + box.width() * i / 3
+            y = box.top() + box.height() * i / 3
+            p.drawLine(QPointF(x, box.top()), QPointF(x, box.bottom()))
+            p.drawLine(QPointF(box.left(), y), QPointF(box.right(), y))
+        p.setPen(QPen(QColor(255, 255, 255), 1.5))
+        p.drawRect(box)
+        p.setBrush(QColor(255, 255, 255))
+        p.setPen(Qt.PenStyle.NoPen)
+        for hx in (box.left(), box.center().x(), box.right()):
+            for hy in (box.top(), box.center().y(), box.bottom()):
+                if (hx, hy) != (box.center().x(), box.center().y()):
+                    p.drawRect(QRectF(hx - 4, hy - 4, 8, 8))
 
     def _paint_loupe(self, p: QPainter):
         dpr = self.devicePixelRatioF()
         h, w, _ = self.linear.shape
+        rx0, ry0, rx1, ry1 = self._region()  # the loupe stays inside the crop
         # Image pixel under the cursor
-        cx = (self.mouse.x() - self._rect.x()) / self._rect.width() * w
-        cy = (self.mouse.y() - self._rect.y()) / self._rect.height() * h
+        cx, cy = self._to_photo(self.mouse)
         half = int(self.radius * dpr)
         x0, y0 = int(cx) - half, int(cy) - half
         x1, y1 = x0 + 2 * half, y0 + 2 * half
         # Small margin so the sharpen blur has context at the crop edge
         m = 4
         ex0, ey0, ex1, ey1 = max(x0 - m, 0), max(y0 - m, 0), min(x1 + m, w), min(y1 + m, h)
-        ix0, iy0, ix1, iy1 = max(x0, 0), max(y0, 0), min(x1, w), min(y1, h)
+        ix0, iy0, ix1, iy1 = max(x0, rx0), max(y0, ry0), min(x1, rx1), min(y1, ry1)
         original = self.show_orig_loupe or self.show_orig_all
         region = np.s_[ey0:ey1, ex0:ex1]
         crop = self._render(
@@ -314,8 +476,20 @@ class PhotoView(QWidget):
             )
 
     # --- input ----------------------------------------------------------
+    CURSORS = {"n": Qt.CursorShape.SizeVerCursor, "s": Qt.CursorShape.SizeVerCursor,
+               "e": Qt.CursorShape.SizeHorCursor, "w": Qt.CursorShape.SizeHorCursor,
+               "nw": Qt.CursorShape.SizeFDiagCursor, "se": Qt.CursorShape.SizeFDiagCursor,
+               "ne": Qt.CursorShape.SizeBDiagCursor, "sw": Qt.CursorShape.SizeBDiagCursor,
+               "move": Qt.CursorShape.SizeAllCursor}
+
     def mouseMoveEvent(self, e):
         self.mouse = e.position()
+        if self.crop_mode and self.linear is not None:
+            if self._drag:
+                self._drag_crop(self.mouse)
+            else:
+                kind = self._hit(self.mouse)
+                self.setCursor(QCursor(self.CURSORS.get(kind, Qt.CursorShape.CrossCursor)))
         self.update()
 
     def leaveEvent(self, e):
@@ -323,10 +497,18 @@ class PhotoView(QWidget):
         self.update()
 
     def mousePressEvent(self, e):
+        if self.crop_mode and self.linear is not None:
+            if e.button() == Qt.MouseButton.LeftButton:
+                kind = self._hit(e.position()) or "new"
+                self._drag = (kind, self._to_photo(e.position()), self._crop_box())
+            return
         self.show_orig_loupe = True
         self.update()
 
     def mouseReleaseEvent(self, e):
+        if self.crop_mode:
+            self._drag = None
+            return
         self.show_orig_loupe = False
         self.update()
 
@@ -336,7 +518,9 @@ class PhotoView(QWidget):
         self.update()
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
+        if self.crop_mode and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+            self.crop_finished.emit(e.key() != Qt.Key.Key_Escape)
+        elif e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
             self.show_orig_all = True
             self.update()
         else:

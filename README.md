@@ -21,6 +21,12 @@ Three tabs, applied in this order:
 3. **Enhancement**: the AI steps below, shown on top of the development.
    Each section can be switched off.
 
+**Crop** (top bar, or `C`): drag the frame, its handles, or a new frame on the
+whole photo; pick an aspect ratio (Free, Original, 1:1, 3:2, 4:3, 5:4, 16:9;
+⇄ swaps portrait / landscape). Enter applies, Esc undoes the changes. The view,
+loupe, histogram and saved file then show only the cropped part. The crop is
+kept per photo and isn't part of presets.
+
 Each AI model runs **at most once per photo** (when you first view it on the
 Enhancement tab, or on save). The models work on a fixed encoding of the
 linear photo, not on the developed one, so their results are kept and the

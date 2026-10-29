@@ -4,6 +4,7 @@ Raw tab: instant, per-pixel dials on the linear photo, then an optional HDR
 section (local tone mapping).
 B&W tab: more development, applied after the Raw tab.
 Enhancement tab: AI denoise + sharpen, shown on top of the development.
+Crop (top bar): applied to the view and the saved file; kept per photo, not in presets.
 Each AI model runs at most once per photo; its result is kept and the dials
 are applied on top (see pipeline.py), so only a new photo re-runs the AI.
 """
@@ -82,6 +83,9 @@ ENH_SH = [
     ("ai_sharpen", "AI sharpen", 0, 150, 70, PCT),  # >100% exaggerates the deblur model
     ("sharpen", "Classic sharpen", 0, 100, 15, PCT),
 ]
+# Crop aspect ratios (width / height); "original" = the photo's own
+CROP_ASPECTS = [("Free", None), ("Original", "original"), ("1:1", 1.0), ("3:2", 3 / 2),
+                ("4:3", 4 / 3), ("5:4", 5 / 4), ("16:9", 16 / 9)]
 RAW_KEYS = [s[0] for s in DEV_LIGHT + DEV_COLOUR]
 HDR_KEYS = [s[0] for s in DEV_HDR]
 BW_KEYS = [s[0] for s in DEV_BW]
@@ -166,9 +170,19 @@ class Saver(QObject):
                 self.progress.emit(done[0], total, label)
                 done[0] += 1
 
+            lin, dn, sharp, base = job["photo"].linear, job["dn"], job["sharp"], None
+            if job["crop"]:
+                # develop only the cropped part; HDR still uses the whole photo's map
+                x0, y0, x1, y1 = job["crop"]
+                if job["dev"].get("hdr"):
+                    base = develop.hdr_base(develop.hdr_map(lin), lin.shape, (y1 - y0, x1 - x0), (y0, x0, y1, x1))
+                cut = np.s_[y0:y1, x0:x1]
+                lin = lin[cut]
+                dn = None if dn is None else dn[cut]
+                sharp = None if sharp is None else sharp[cut]
             rgb = pipeline.compose(
-                job["photo"].linear, job["dn"], job["sharp"], job["g"], job["dev"],
-                job["photo"].baseline_ev, job["enh"], progress=step,
+                lin, dn, sharp, job["g"], job["dev"], job["photo"].baseline_ev, job["enh"],
+                base=base, progress=step,
             )
             step(f"Writing {job['out'].name}")
             saved = imageio.save(job["photo"], rgb, job["out"])
@@ -228,6 +242,29 @@ class MainWindow(QMainWindow):
         del_preset.clicked.connect(self.delete_preset)
         self.refresh_presets()
 
+        self.crop_btn = QPushButton("Crop")
+        self.crop_btn.setCheckable(True)
+        self.crop_btn.setShortcut("C")
+        self.crop_btn.setToolTip("Crop (C). Drag the frame or its handles; Enter = done, Esc = undo changes")
+        self.crop_btn.setEnabled(False)
+        self.crop_btn.toggled.connect(self.crop_toggled)
+        self.aspect_box = QComboBox()
+        for name, ratio in CROP_ASPECTS:
+            self.aspect_box.addItem(name, ratio)
+        self.aspect_box.setToolTip("Crop aspect ratio")
+        self.aspect_box.currentIndexChanged.connect(lambda _: self.aspect_changed())
+        self.aspect_flip = QPushButton("⇄")
+        self.aspect_flip.setToolTip("Swap portrait / landscape")
+        self.aspect_flip.setFixedWidth(32)
+        self.aspect_flip.clicked.connect(self.flip_aspect)
+        self.crop_reset = QPushButton("Reset crop")
+        self.crop_reset.clicked.connect(lambda: self.view.set_crop(None))
+        self.portrait = False
+        self._crop_before: tuple | None = None  # crop when crop mode started (Esc restores it)
+        self.view.crop_changed.connect(self.on_crop_changed)
+        self.view.crop_finished.connect(self.crop_finished)
+        self._set_crop_controls()
+
         self.progress = QProgressBar()
         self.progress.setMaximumWidth(220)
         self.progress.setTextVisible(True)
@@ -241,7 +278,8 @@ class MainWindow(QMainWindow):
         self.status = QLabel(engine.device_name())
 
         top = QHBoxLayout()
-        for w in (open_btn, self.save_btn, QLabel("   Preset:"), self.preset_box, save_preset, del_preset):
+        for w in (open_btn, self.save_btn, QLabel("   Preset:"), self.preset_box, save_preset, del_preset,
+                  QLabel("   "), self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.status)
@@ -499,6 +537,53 @@ class MainWindow(QMainWindow):
                     note = f"RAW has detail past white ({frac * 100:.1f}%): pull Highlights left"
         self.hist.set_histogram(hist, note)
 
+    # --- crop -------------------------------------------------------------
+    def _set_crop_controls(self):
+        on = self.crop_btn.isChecked()
+        for w in (self.aspect_box, self.aspect_flip):
+            w.setVisible(on)
+        self.crop_reset.setVisible(on or self.view.crop is not None)
+
+    def crop_toggled(self, on: bool):
+        if on:
+            self._crop_before = self.view.crop
+            self.aspect_changed()
+        self.view.set_crop_mode(on)
+        self.view.setFocus()  # for Enter / Esc
+        self._set_crop_controls()
+        self.on_crop_changed(self.view.crop)
+
+    def crop_finished(self, keep: bool):
+        if not keep:
+            self.view.set_crop(self._crop_before)
+        self.crop_btn.setChecked(False)
+
+    def _aspect(self) -> float | None:
+        ratio = self.aspect_box.currentData()
+        if ratio == "original" and self.photo is not None:
+            h, w, _ = self.photo.linear.shape
+            ratio = w / h
+        if not isinstance(ratio, float):
+            return None
+        return 1 / ratio if self.portrait else ratio
+
+    def aspect_changed(self):
+        if self.crop_btn.isChecked():
+            self.view.set_crop_aspect(self._aspect())
+
+    def flip_aspect(self):
+        self.portrait = not self.portrait
+        self.aspect_changed()
+
+    def on_crop_changed(self, crop):
+        self._set_crop_controls()
+        if self.photo is None:
+            return
+        h, w, _ = self.photo.linear.shape
+        cw, ch = (crop[2] - crop[0], crop[3] - crop[1]) if crop else (w, h)
+        if self.crop_btn.isChecked() or crop:
+            self.status.setText(f"Crop {cw}×{ch}" + ("" if self.crop_btn.isChecked() else " (C to change)"))
+
     # --- presets ----------------------------------------------------------
     def settings(self) -> dict:
         def stem(box: QComboBox):
@@ -650,6 +735,7 @@ class MainWindow(QMainWindow):
         h, w, _ = photo.linear.shape
         kind = f"RAW, base exposure +{photo.baseline_ev:.2f} EV" if photo.meta.get("raw") else f"{photo.meta.get('bits')}-bit"
         self.setWindowTitle(f"Freeroom — {path.name} ({w}×{h}, {kind})")
+        self.crop_btn.setEnabled(True)
         self.view.set_linear(photo.linear, photo.baseline_ev, self.g)
         if not self.busy:
             self.update_pipeline()
@@ -810,7 +896,7 @@ class MainWindow(QMainWindow):
         self.start_save.emit({
             "photo": self.photo, "out": out, "g": self.g,
             "dn": self.results.get(dn_key), "sharp": self.results.get(sh_key),
-            "dev": dict(self.dev_params), "enh": self.effective_enh(),
+            "dev": dict(self.dev_params), "enh": self.effective_enh(), "crop": self.view.crop,
         })
 
     def on_save_progress(self, done: int, total: int, label: str):
