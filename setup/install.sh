@@ -56,6 +56,63 @@ if [ "$MODE" = auto ]; then
 fi
 echo "Installing: $MODE, PyTorch $EXTRA"
 
+# System packages a native Linux install needs: curl for the downloads, and
+# the libraries Qt's display plugins load (PySide6 brings Qt itself). Only the
+# missing ones are installed, with sudo. "a|b" = either name (differs by release).
+APT_PKGS="curl ca-certificates libglib2.0-0t64|libglib2.0-0 libdbus-1-3 libfontconfig1
+  libfreetype6 libegl1 libgl1 libdrm2 libx11-6 libx11-xcb1 libxkbcommon0 libxkbcommon-x11-0
+  libxcb1 libxcb-cursor0 libxcb-glx0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0
+  libxcb-render0 libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-util1
+  libxcb-xfixes0 libxcb-xkb1 libwayland-client0 libwayland-cursor0 libwayland-egl1 libwayland-server0"
+DNF_PKGS="curl ca-certificates glib2 dbus-libs fontconfig freetype mesa-libEGL mesa-libGL libdrm
+  libX11 libX11-xcb libxkbcommon libxkbcommon-x11 libxcb xcb-util xcb-util-cursor xcb-util-image
+  xcb-util-keysyms xcb-util-renderutil xcb-util-wm libwayland-client libwayland-cursor
+  libwayland-egl libwayland-server"
+system_packages() {
+  local mgr install missing="" pkg alt
+  if command -v apt-get >/dev/null; then
+    mgr=apt; set -- $APT_PKGS
+    have() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "ok installed"; }
+    known() { apt-cache show "$1" >/dev/null 2>&1; }
+    install="apt-get install -y"
+  elif command -v dnf >/dev/null; then
+    mgr=dnf; set -- $DNF_PKGS
+    have() { rpm -q "$1" >/dev/null 2>&1; }
+    known() { dnf -q list --available "$1" >/dev/null 2>&1 || rpm -q "$1" >/dev/null 2>&1; }
+    install="dnf install -y --setopt=install_weak_deps=False"
+  else
+    echo "Note: unknown package manager; if Freeroom won't start, install curl and Qt's X11/Wayland libraries." >&2
+    return 0
+  fi
+  for pkg in "$@"; do
+    local found=""
+    for alt in ${pkg//|/ }; do have "$alt" && found=1 && break; done
+    [ -n "$found" ] && continue
+    for alt in ${pkg//|/ }; do known "$alt" && missing="$missing $alt" && break; done
+  done
+  [ -z "$missing" ] && return 0
+  echo "Installing system packages ($mgr):$missing"
+  local SUDO=""
+  [ "$(id -u)" -ne 0 ] && SUDO=sudo
+  [ "$mgr" = apt ] && $SUDO apt-get update -qq
+  # shellcheck disable=SC2086
+  $SUDO $install $missing
+}
+# After the install: any library Qt (or OpenCV / rawpy) still can't find?
+missing_libs() {
+  local sp="$HERE/.venv/lib/python3.12/site-packages" q f
+  q="$sp/PySide6/Qt"
+  for f in "$q"/plugins/platforms/*.so "$q"/plugins/wayland-*/*.so "$q"/plugins/xcbglintegrations/*.so \
+           "$q"/lib/libQt6{Core,Gui,Widgets,DBus,OpenGL,XcbQpa,WaylandClient,WaylandEglClientHwIntegration}.so.6 \
+           "$sp"/PySide6/Qt{Core,Gui,Widgets}.*.so "$sp"/cv2/cv2*.so "$sp"/rawpy/*.so; do
+    [ -f "$f" ] || continue
+    ldd "$f" 2>/dev/null | grep "not found" | sed 's/ =>.*//; s/^[[:space:]]*//' || true
+  done | sort -u
+}
+if [ "$MODE" = native ] && [ "$(uname -s)" = Linux ]; then
+  system_packages
+fi
+
 # uv sync with the chosen build; the extra decides which PyTorch index is used.
 SYNC="command -v uv >/dev/null || [ -x \$HOME/.local/bin/uv ] || curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH=\$HOME/.local/bin:\$PATH
@@ -76,6 +133,7 @@ if [ "$MODE" = box ]; then
     qt6-qtbase-gui qt6-qtwayland xcb-util-cursor mesa-libGL mesa-libEGL curl
   echo "Installing uv + Python deps…"
   distrobox enter "$BOX" -- bash -lc "$SYNC"
+  # shellcheck disable=SC2088  # expanded by the shell that starts the app
   UV='~/.local/bin/uv'  # inside the box
 else
   echo "Installing uv + Python deps…"
@@ -86,9 +144,19 @@ fi
 
 printf 'mode=%s\nbox=%s\nextra=%s\nuv=%s\n' "$MODE" "$BOX" "$EXTRA" "$UV" > "$HERE/.install"
 
+if [ "$MODE" = native ] && [ "$(uname -s)" = Linux ]; then
+  LEFT="$(missing_libs)"
+  if [ -n "$LEFT" ]; then
+    echo "Warning: these libraries are still missing, Freeroom may not start:" >&2
+    echo "$LEFT" | sed 's/^/  /' >&2
+    echo "Install the packages that provide them with your package manager." >&2
+  fi
+fi
+
 "$HERE/setup/download-models.sh"
 "$HERE/setup/install-launcher.sh"
 
 echo
+# shellcheck disable=SC2088  # just text
 if [ "$(uname -s)" = Darwin ]; then WHERE="~/Applications (Freeroom)"; else WHERE="the app menu (Freeroom)"; fi
 echo "Done. Start it from $WHERE or: $HERE/freeroom.sh [photo]"

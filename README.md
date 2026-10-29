@@ -39,13 +39,38 @@ missing enhancement first.
 
 ## Requirements
 
-Tested on Bazzite (Fedora-based) with an RTX 4080 and NVIDIA driver 615 (in
-the distrobox), and natively on Debian 13 without an NVIDIA GPU (CPU build).
+### Compatibility
 
-- Linux: **x86_64** (the PyTorch and rawpy wheels used are x86_64; no ARM)
-  and a **Wayland or X11 desktop** (KDE, GNOME, …)
-- macOS (untested so far): **Apple Silicon** (M1 or newer; PyTorch 2.8 has no
-  Intel Mac build) and **macOS 14 Sonoma or newer** (PySide6 6.12)
+`./setup/install.sh` picks how to install by itself (see Usage). Status of
+each platform:
+
+| Platform | How it installs | PyTorch | Status |
+|---|---|---|---|
+| Debian 13 | native | CPU | ✅ Tested on a real desktop (KDE, Wayland) and in a clean container |
+| Ubuntu 24.04 | native | CPU | ✅ Tested in a clean container |
+| Fedora 43 | native | CPU | ✅ Tested in a clean container |
+| Bazzite | Fedora distrobox | CUDA (NVIDIA) | ✅ The app was tested with an RTX 4080, driver 615; ⚠️ the current installer's distrobox route hasn't run yet |
+| Other Linux with distrobox | Fedora distrobox | CUDA or CPU | ⚠️ Untested; same route as Bazzite |
+| Linux with an NVIDIA GPU, native | native | CUDA | ⚠️ Untested |
+| macOS 14+, Apple Silicon | native + `Freeroom.app` | Metal (Apple GPU) | ⚠️ Untested on a real Mac (installer and app bundle checked in a simulated run) |
+| macOS on Intel | — | — | ❌ Not supported (PyTorch 2.8 has no Intel Mac build); the installer stops with a message |
+| Linux on ARM, Windows | — | — | ❌ Not supported |
+
+"Clean container" = fresh minimal image, installed as a normal user with
+sudo: the installer added the missing system packages, then the app started
+both offscreen and on an X server (Xvfb, Qt's xcb plugin) and an AI model ran.
+Wayland was only tested on the Debian desktop. Other apt- or dnf-based
+distros (Linux Mint, Pop!_OS, RHEL/Alma/Rocky with EPEL…) should work the
+same way; with any other package manager the installer can't add system
+packages, but it says which libraries are missing.
+
+### What's needed
+
+- Linux: **x86_64** (the PyTorch and rawpy wheels used are x86_64; no ARM),
+  a **Wayland or X11 desktop** (KDE, GNOME, …), and **sudo** for the system
+  packages the installer may add (curl, Qt's X11/Wayland/GL libraries)
+- macOS: **Apple Silicon** (M1 or newer; PyTorch 2.8 has no Intel Mac build)
+  and **macOS 14 Sonoma or newer** (PySide6 6.12)
 - Optional: **distrobox** with podman or docker. If it's installed, Freeroom
   goes in its own Fedora box and the host distro matters little; otherwise it
   installs natively (uv brings its own Python 3.12).
@@ -69,7 +94,9 @@ Open… or by dropping them on the window (the app doesn't get Finder's
 
 - Setup (re-runnable): `./setup/install.sh`
   (`--box` / `--native` to choose where, `--cpu` / `--cu128` to force the build;
-  the choice is saved in `.install`)
+  the choice is saved in `.install`). A native Linux install first adds any missing
+  system packages it needs (curl, Qt's X11/Wayland/GL libraries) with sudo, via apt
+  or dnf, and warns afterwards if a library is still missing.
 - Run: app menu → **Freeroom**, or `./freeroom.sh [photo]`
 - Smoke test: `~/.local/bin/uv run --no-sync python tests/smoke.py`
   (inside the box when installed there: `distrobox enter freeroom -- bash -lc '…'`)
