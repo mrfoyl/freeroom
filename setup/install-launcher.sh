@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Adds "Freeroom" to the KDE app menu (runs inside the distrobox).
+# Adds "Freeroom" to the app menu; freeroom.sh starts it the way it was installed.
 set -euo pipefail
-BOX="${1:-freeroom}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 APPS="$HOME/.local/share/applications"
 mkdir -p "$APPS"
@@ -12,7 +11,7 @@ cat > "$APPS/freeroom.desktop" <<DESK
 [Desktop Entry]
 Type=Application
 Name=Freeroom
-Comment=AI photo noise reduction (local GPU)
+Comment=RAW development and AI photo noise reduction
 Exec=$HERE/freeroom.sh %f
 Icon=$ICON
 Terminal=false

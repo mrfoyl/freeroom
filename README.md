@@ -38,27 +38,33 @@ missing enhancement first.
 
 ## Requirements
 
-Only tested on Bazzite (Fedora-based) with an RTX 4080 and NVIDIA driver 615.
-Freeroom runs inside a Fedora distrobox, so the host distro matters little.
-The host needs:
+Tested on Bazzite (Fedora-based) with an RTX 4080 and NVIDIA driver 615 (in
+the distrobox), and natively on Debian 13 without an NVIDIA GPU (CPU build).
 
-- **distrobox** with podman or docker (Fedora, Bazzite/Silverblue, Ubuntu,
-  Arch, … all work)
-- **x86_64** (the CUDA PyTorch and rawpy wheels are x86_64; no ARM)
-- **NVIDIA GPU with the proprietary driver ≥ 570** (CUDA 12.8 PyTorch build;
-  GPU access via `distrobox create --nvidia`)
-- **≥ 4 GB VRAM** to be safe (each AI step uses ~1.3–3 GB)
+- **x86_64** (the PyTorch and rawpy wheels used are x86_64; no ARM)
 - **Wayland or X11 desktop** (KDE, GNOME, …)
+- Optional: **distrobox** with podman or docker. If it's installed, Freeroom
+  goes in its own Fedora box and the host distro matters little; otherwise it
+  installs natively (uv brings its own Python 3.12).
+- For fast AI steps: **NVIDIA GPU with the proprietary driver ≥ 570** (CUDA
+  12.8 PyTorch build) and **≥ 4 GB VRAM** (each AI step uses ~1.3–3 GB)
 
-Without an NVIDIA GPU it falls back to the CPU: the Raw development tab is
-still instant, but the AI steps take minutes per photo instead of seconds.
-AMD GPUs would need the ROCm PyTorch build instead (untested).
+The installer picks the PyTorch build: CUDA 12.8 when `nvidia-smi` finds a GPU,
+otherwise the CPU build (~1.7 GB environment instead of ~7 GB). On the CPU the
+Raw/HDR/B&W tabs are still instant, but the AI steps take minutes to hours
+per photo instead of seconds. AMD GPUs would need the ROCm PyTorch build
+instead (untested).
 
 ## Usage
 
-- Setup (on the Bazzite host, re-runnable): `./setup/create-distrobox.sh`
+- Setup (re-runnable): `./setup/install.sh`
+  (`--box` / `--native` to choose where, `--cpu` / `--cu128` to force the build;
+  the choice is saved in `.install`)
 - Run: app menu → **Freeroom**, or `./freeroom.sh [photo]`
-- Smoke test: `distrobox enter freeroom -- bash -lc 'cd ~/github_projects_workspace/freeroom && ~/.local/bin/uv run --no-sync python tests/smoke.py'`
+- Smoke test: `~/.local/bin/uv run --no-sync python tests/smoke.py`
+  (inside the box when installed there: `distrobox enter freeroom -- bash -lc '…'`)
+- Updating deps by hand: `uv sync --extra cpu` or `uv sync --extra cu128`. Plain
+  `uv sync` or `uv run` without `--no-sync` would drop PyTorch, as it's an extra.
 
 Loupe = 100% (1 photo px = 1 screen px). Hold mouse = original in loupe,
 hold Space = original everywhere, scroll = loupe size.
