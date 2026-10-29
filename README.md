@@ -27,6 +27,15 @@ whole photo; pick an aspect ratio (Free, Original, 1:1, 3:2, 4:3, 5:4, 16:9;
 loupe, histogram and saved file then show only the cropped part. The crop is
 kept per photo and isn't part of presets.
 
+**Batch…** (top bar): process a whole folder with a preset (or the current
+settings): pick the input and output folder, the format (JPEG, 16-bit TIFF or
+PNG) and an optional name suffix; subfolders can be included (their structure
+is kept). Files that already exist in the output are skipped unless you tick
+Overwrite, so a stopped batch can just be started again. Each photo gets the
+preset's AI steps (once each) and its development, exactly like saving it by
+hand; crops are per photo, so batches don't crop. Cancel stops after the
+current AI tile; a photo that fails is logged and the batch goes on.
+
 Each AI model runs **at most once per photo** (when you first view it on the
 Enhancement tab, or on save). The models work on a fixed encoding of the
 linear photo, not on the developed one, so their results are kept and the

@@ -5,6 +5,7 @@ section (local tone mapping).
 B&W tab: more development, applied after the Raw tab.
 Enhancement tab: AI denoise + sharpen, shown on top of the development.
 Crop (top bar): applied to the view and the saved file; kept per photo, not in presets.
+Batch… (top bar): one preset over a whole folder (see batch.py).
 Each AI model runs at most once per photo; its result is kept and the dials
 are applied on top (see pipeline.py), so only a new photo re-runs the AI.
 """
@@ -22,13 +23,17 @@ from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -40,7 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import develop, engine, imageio, pipeline, presets
+from . import batch, develop, engine, imageio, pipeline, presets
 from .widgets import Histogram, PhotoView, ResetSlider
 
 SAVE_DIR = Path.home() / "Pictures" / "freeroom"
@@ -191,6 +196,256 @@ class Saver(QObject):
             self.failed.emit(str(e))
 
 
+class BatchWorker(QObject):
+    """Runs a batch off the GUI thread, one photo after another."""
+
+    file_started = Signal(int, int, str)  # index, count, name
+    stage = Signal(str)  # "name: stage"
+    tiles = Signal(int, int)
+    file_done = Signal(str, str)  # status (done / skipped / failed), message
+    finished = Signal(bool)  # False = cancelled
+
+    def __init__(self):
+        super().__init__()
+        self.processor = batch.Processor()
+        self.cancel = False
+
+    def run(self, plan: dict):
+        photos, job = plan["photos"], plan["job"]
+        for i, src in enumerate(photos):
+            if self.cancel:
+                break
+            out = batch.output_path(src, plan["in_dir"], plan["out_dir"], plan["ext"], plan["suffix"])
+            name = str(src.relative_to(plan["in_dir"]))
+            self.file_started.emit(i, len(photos), name)
+            if out.exists() and not plan["overwrite"]:
+                self.file_done.emit("skipped", f"{name}: {out.name} already exists")
+                continue
+            try:
+                ok = self.processor.process(src, out, job, lambda st, n=name: self.stage.emit(f"{n}: {st}…"),
+                                            self.tiles.emit, lambda: self.cancel)
+                if ok:
+                    self.file_done.emit("done", f"{name} → {out.relative_to(plan['out_dir'])}")
+            except Exception as e:  # keep going with the next photo
+                self.file_done.emit("failed", f"{name}: {type(e).__name__}: {e}")
+        self.finished.emit(not self.cancel)
+
+
+class BatchDialog(QDialog):
+    """Pick a preset, an input and an output folder; process every photo."""
+
+    start = Signal(object)
+
+    def __init__(self, win: "MainWindow"):
+        super().__init__(win)
+        self.win = win
+        self.setWindowTitle("Batch processing")
+        self.setMinimumWidth(640)
+        self.running = False
+
+        self.preset = QComboBox()
+        self.preset.addItem("Current settings", None)
+        for name in presets.names():
+            self.preset.addItem(name, name)
+        current = win.preset_box.currentData()
+        if current:
+            self.preset.setCurrentIndex(max(0, self.preset.findData(current)))
+        start_dir = str(win.photo.path.parent) if win.photo else str(Path.home() / "Pictures")
+        self.in_dir = QLineEdit(start_dir)
+        self.out_dir = QLineEdit(str(SAVE_DIR / "batch"))
+        self.format = QComboBox()
+        self.format.addItems(list(batch.FORMATS))
+        self.suffix = QLineEdit("")
+        self.suffix.setPlaceholderText("e.g. _edit (optional)")
+        self.recursive = QCheckBox("Include subfolders (kept in the output)")
+        self.overwrite = QCheckBox("Overwrite files that already exist (else skip them)")
+
+        self.browse: list[QPushButton] = []
+
+        def folder_row(edit: QLineEdit, title: str):
+            pick = QPushButton("Browse…")
+            pick.clicked.connect(lambda: self._pick(edit, title))
+            self.browse.append(pick)
+            row = QHBoxLayout()
+            row.addWidget(edit, 1)
+            row.addWidget(pick)
+            return row
+
+        form = QFormLayout()
+        form.addRow("Preset", self.preset)
+        form.addRow("Input folder", folder_row(self.in_dir, "Input folder"))
+        form.addRow("Output folder", folder_row(self.out_dir, "Output folder"))
+        form.addRow("Format", self.format)
+        form.addRow("Name suffix", self.suffix)
+        form.addRow("", self.recursive)
+        form.addRow("", self.overwrite)
+
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        self.summary.setStyleSheet("color: #999;")
+        self.current = QLabel("")
+        self.overall = QProgressBar()
+        self.tile_bar = QProgressBar()
+        self.tile_bar.setFormat("tile %v/%m")
+        self.log = QListWidget()
+        self.log.setMinimumHeight(160)
+        self.start_btn = QPushButton("Start")
+        self.start_btn.setDefault(True)
+        self.start_btn.clicked.connect(self.start_batch)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.cancel_batch)
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.accept)
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        for b in (self.start_btn, self.cancel_btn, self.close_btn):
+            buttons.addWidget(b)
+
+        lay = QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addWidget(self.summary)
+        lay.addWidget(self.current)
+        lay.addWidget(self.overall)
+        lay.addWidget(self.tile_bar)
+        lay.addWidget(self.log, 1)
+        lay.addLayout(buttons)
+
+        for w in (self.preset, self.format):
+            w.currentIndexChanged.connect(lambda _: self._update_summary())
+        for w in (self.in_dir, self.out_dir, self.suffix):
+            w.textChanged.connect(lambda _: self._update_summary())
+        self.recursive.toggled.connect(lambda _: self._update_summary())
+
+        self.thread = QThread(self)
+        self.worker = BatchWorker()
+        self.worker.moveToThread(self.thread)
+        self.start.connect(self.worker.run)
+        self.worker.file_started.connect(self.on_file_started)
+        self.worker.stage.connect(self.current.setText)
+        self.worker.tiles.connect(self.on_tiles)
+        self.worker.file_done.connect(self.on_file_done)
+        self.worker.finished.connect(self.on_finished)
+        self.thread.start()
+        self.counts = {"done": 0, "skipped": 0, "failed": 0}
+        self._set_running(False)
+        self._update_summary()
+
+    def _pick(self, edit: QLineEdit, title: str):
+        path = QFileDialog.getExistingDirectory(self, title, edit.text() or str(Path.home()))
+        if path:
+            edit.setText(path)
+
+    def _settings(self) -> dict:
+        name = self.preset.currentData()
+        return presets.load(name) if name else self.win.settings()
+
+    def _plan(self) -> dict:
+        """What would run with the current choices; raises ValueError with a reason."""
+        in_dir = Path(self.in_dir.text()).expanduser()
+        out_dir = Path(self.out_dir.text()).expanduser()
+        if not in_dir.is_dir():
+            raise ValueError("The input folder doesn't exist.")
+        if not self.out_dir.text().strip():
+            raise ValueError("Pick an output folder.")
+        job = batch.job_from_settings(self._settings(), {k: SLIDER_DEFAULTS[k] / 100 for k in ENH_KEYS})
+        photos = batch.find_photos(in_dir, self.recursive.isChecked())
+        if out_dir.resolve() != in_dir.resolve() and out_dir.resolve().is_relative_to(in_dir.resolve()):
+            photos = [p for p in photos if not p.resolve().is_relative_to(out_dir.resolve())]  # not our own output
+        if not photos:
+            raise ValueError("No photos in the input folder.")
+        return {"photos": photos, "job": job, "in_dir": in_dir, "out_dir": out_dir,
+                "ext": batch.FORMATS[self.format.currentText()], "suffix": self.suffix.text().strip(),
+                "overwrite": self.overwrite.isChecked()}
+
+    def _update_summary(self):
+        if self.running:
+            return
+        try:
+            plan = self._plan()
+        except Exception as e:
+            self.summary.setText(str(e))
+            self.start_btn.setEnabled(False)
+            return
+        job = plan["job"]
+        steps = [s for s, on in (("AI denoise", job.denoise), ("AI sharpen", job.sharpen)) if on]
+        ai = " + ".join(steps) if steps else "no AI steps"
+        slow = "" if not steps or engine._device().type != "cpu" else " On the CPU the AI steps take a long time per photo."
+        n = len(plan["photos"])
+        self.summary.setText(f"{n} photo{'s' if n != 1 else ''} · {ai} · {self.format.currentText()}.{slow}")
+        self.start_btn.setEnabled(True)
+
+    def _set_running(self, on: bool):
+        self.running = on
+        for w in (self.preset, self.in_dir, self.out_dir, self.format, self.suffix, self.recursive, self.overwrite,
+                  *self.browse):
+            w.setEnabled(not on)
+        self.start_btn.setVisible(not on)
+        self.cancel_btn.setVisible(on)
+        self.cancel_btn.setEnabled(on)
+        self.close_btn.setEnabled(not on)
+
+    def start_batch(self):
+        try:
+            plan = self._plan()
+        except Exception as e:
+            QMessageBox.warning(self, "Batch", str(e))
+            return
+        if self.win.busy:  # don't share the GPU with an interactive AI run
+            self.win.cancel_job()
+        self.log.clear()
+        self.counts = {"done": 0, "skipped": 0, "failed": 0}
+        self.overall.setRange(0, len(plan["photos"]))
+        self.overall.setValue(0)
+        self.tile_bar.setVisible(bool(plan["job"].denoise or plan["job"].sharpen))  # AI tiles only
+        self.worker.cancel = False
+        self._set_running(True)
+        self.start.emit(plan)
+
+    def cancel_batch(self):
+        self.worker.cancel = True
+        self.cancel_btn.setEnabled(False)
+        self.current.setText("Cancelling after the current tile…")
+
+    def on_file_started(self, i: int, n: int, name: str):
+        self.overall.setValue(i)
+        self.overall.setFormat(f"photo {i + 1}/{n}")
+        self.tile_bar.setRange(0, 1)
+        self.tile_bar.setValue(0)
+
+    def on_tiles(self, done: int, total: int):
+        self.tile_bar.setRange(0, total)
+        self.tile_bar.setValue(done)
+
+    def on_file_done(self, status: str, msg: str):
+        self.counts[status] += 1
+        self.log.addItem({"done": "✓ ", "skipped": "– ", "failed": "✗ "}[status] + msg)
+        self.log.scrollToBottom()
+        self.overall.setValue(self.overall.value() + 1)
+
+    def on_finished(self, complete: bool):
+        self._set_running(False)
+        self.overall.setValue(self.overall.maximum() if complete else self.overall.value())
+        self.overall.setFormat("%v/%m photos")
+        c = self.counts
+        head = "Done" if complete else "Cancelled"
+        self.current.setText(f"{head}: {c['done']} saved, {c['skipped']} skipped, {c['failed']} failed.")
+        self.win.status.setText(f"Batch {head.lower()}: {c['done']} saved")
+
+    def closeEvent(self, e):
+        if self.running:  # cancel first
+            e.ignore()
+            return
+        super().closeEvent(e)
+
+    def done(self, result: int):
+        """Every way of closing (Close, Esc, the window's ×) ends here."""
+        if self.running:
+            return
+        self.thread.quit()
+        self.thread.wait(5000)
+        super().done(result)
+
+
 class MainWindow(QMainWindow):
     start_job = Signal(object)
     start_load = Signal(int, object)
@@ -240,6 +495,9 @@ class MainWindow(QMainWindow):
         save_preset.clicked.connect(self.save_preset)
         del_preset = QPushButton("Delete preset")
         del_preset.clicked.connect(self.delete_preset)
+        batch_btn = QPushButton("Batch…")
+        batch_btn.setToolTip("Process a whole folder with a preset")
+        batch_btn.clicked.connect(lambda: BatchDialog(self).exec())
         self.refresh_presets()
 
         self.crop_btn = QPushButton("Crop")
@@ -279,7 +537,7 @@ class MainWindow(QMainWindow):
 
         top = QHBoxLayout()
         for w in (open_btn, self.save_btn, QLabel("   Preset:"), self.preset_box, save_preset, del_preset,
-                  QLabel("   "), self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset):
+                  batch_btn, QLabel("   "), self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.status)
