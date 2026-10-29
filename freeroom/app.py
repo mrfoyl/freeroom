@@ -1,7 +1,8 @@
 """Freeroom GUI: open a photo, develop it, enhance it with AI, save.
 
-Raw tab: instant, per-pixel dials on the linear photo.
-HDR and B&W tabs: more development, applied after the Raw tab.
+Raw tab: instant, per-pixel dials on the linear photo, then an optional HDR
+section (local tone mapping).
+B&W tab: more development, applied after the Raw tab.
 Enhancement tab: AI denoise + sharpen, shown on top of the development.
 Each AI model runs at most once per photo; its result is kept and the dials
 are applied on top (see pipeline.py), so only a new photo re-runs the AI.
@@ -205,7 +206,6 @@ class MainWindow(QMainWindow):
         # --- tabs
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_develop_tab(), "Raw")
-        self.tabs.addTab(self._build_hdr_tab(), "HDR")
         self.tabs.addTab(self._build_bw_tab(), "B&&W")
         self.enh_tab = self._build_enhance_tab()
         self.tabs.addTab(self.enh_tab, "Enhancement")
@@ -215,7 +215,7 @@ class MainWindow(QMainWindow):
             "<b>Loupe</b> = 100% (1 photo pixel = 1 screen pixel).<br>"
             "Hold mouse button: before, in loupe · Hold Space: before, everywhere · "
             "Scroll: loupe size.<br>"
-            "<i>Before</i> = as shot on the Raw, HDR and B&amp;W tabs, unenhanced on the Enhancement tab."
+            "<i>Before</i> = as shot on the Raw and B&amp;W tabs, unenhanced on the Enhancement tab."
         )
         hint.setStyleSheet("color: #999;")
         hint.setWordWrap(True)
@@ -290,12 +290,22 @@ class MainWindow(QMainWindow):
         form = QFormLayout(colour)
         for spec in DEV_COLOUR:
             self._add_slider(form, spec, self.dev_changed)
+        self.hdr_group = self._dev_group("HDR tone mapping", "hdr")
+        self.hdr_group.setToolTip(
+            "Squeezes a high-contrast scene into the picture: Compression lifts shadows and "
+            "pulls highlights down area by area, Local detail brings back (or tames) texture "
+            "and local contrast. Works best on RAW files."
+        )
+        form = QFormLayout(self.hdr_group)
+        for spec in DEV_HDR:
+            self._add_slider(form, spec, self.dev_changed)
         reset = QPushButton("Reset development")
-        reset.clicked.connect(lambda: self._reset(RAW_KEYS))
+        reset.clicked.connect(lambda: self._reset(RAW_KEYS + HDR_KEYS))
         tab = QWidget()
         lay = QVBoxLayout(tab)
         lay.addWidget(light)
         lay.addWidget(colour)
+        lay.addWidget(self.hdr_group)
         lay.addWidget(reset)
         lay.addStretch(1)
         return tab
@@ -312,28 +322,6 @@ class MainWindow(QMainWindow):
 
         group.toggled.connect(toggled)
         return group
-
-    def _build_hdr_tab(self) -> QWidget:
-        self.hdr_group = self._dev_group("HDR tone mapping", "hdr")
-        form = QFormLayout(self.hdr_group)
-        for spec in DEV_HDR:
-            self._add_slider(form, spec, self.dev_changed)
-        reset = QPushButton("Reset HDR")
-        reset.clicked.connect(lambda: self._reset(HDR_KEYS))
-        note = QLabel(
-            "Squeezes a high-contrast scene into the picture: <i>Compression</i> lifts "
-            "shadows and pulls highlights down area by area, <i>Local detail</i> brings "
-            "back (or tames) texture and local contrast. Works best on RAW files."
-        )
-        note.setStyleSheet("color: #999;")
-        note.setWordWrap(True)
-        tab = QWidget()
-        lay = QVBoxLayout(tab)
-        lay.addWidget(self.hdr_group)
-        lay.addWidget(reset)
-        lay.addWidget(note)
-        lay.addStretch(1)
-        return tab
 
     def _build_bw_tab(self) -> QWidget:
         self.bw_group = self._dev_group("Black && white", "bw")
