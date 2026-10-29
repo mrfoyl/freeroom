@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import develop, engine, imageio, pipeline, presets
-from .widgets import Histogram, PhotoView
+from .widgets import Histogram, PhotoView, ResetSlider
 
 SAVE_DIR = Path.home() / "Pictures" / "freeroom"
 ICON = Path(__file__).resolve().parent / "assets" / "freeroom.png"  # optional, gitignored
@@ -264,7 +264,7 @@ class MainWindow(QMainWindow):
     # --- building the tabs ----------------------------------------------
     def _add_slider(self, form: QFormLayout, spec, on_change: Callable[[str, float], None]):
         key, text, lo, hi, default, fmt = spec
-        s = QSlider(Qt.Orientation.Horizontal)
+        s = ResetSlider(default)
         s.setRange(lo, hi)
         s.setValue(default)
         val = QLabel(fmt(default))

@@ -1,4 +1,4 @@
-"""Photo view with the 100% loupe, and the RGB range view (histogram)."""
+"""Photo view with the 100% loupe, the RGB range view (histogram), and sliders."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QSlider, QWidget
 
 from . import develop, pipeline
 
@@ -17,6 +17,19 @@ def to_qimage(rgb: np.ndarray, dpr: float = 1.0) -> QImage:
     img = QImage(arr.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
     img.setDevicePixelRatio(dpr)
     return img
+
+
+class ResetSlider(QSlider):
+    """Horizontal slider that jumps back to its default on double-click."""
+
+    def __init__(self, default: int):
+        super().__init__(Qt.Orientation.Horizontal)
+        self.default = default
+        self.setToolTip("Double-click to reset")
+
+    def mouseDoubleClickEvent(self, e):
+        self.setValue(self.default)
+        e.accept()
 
 
 class PhotoView(QWidget):
