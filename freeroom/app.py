@@ -136,8 +136,23 @@ class Worker(QObject):
             self.failed.emit(f"{type(e).__name__}: {e}")
 
 
+class Loader(QObject):
+    """Opens photos off the GUI thread (RAW decoding takes seconds)."""
+
+    loaded = Signal(int, object, float)  # request id, Photo, AI encoding scale
+    failed = Signal(int, str, str)  # request id, file name, error
+
+    def load(self, req: int, path: Path):
+        try:
+            photo = imageio.load(path)
+            self.loaded.emit(req, photo, pipeline.ai_scale(photo.linear, photo.baseline_ev))
+        except Exception as e:
+            self.failed.emit(req, path.name, str(e))
+
+
 class MainWindow(QMainWindow):
     start_job = Signal(object)
+    start_load = Signal(int, object)
 
     def __init__(self):
         super().__init__()
@@ -193,6 +208,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.setToolTip("Stop the AI denoise / sharpen run (after the current tile)")
         self.cancel_btn.clicked.connect(self.cancel_job)
         self.cancel_btn.hide()
+        self.load_req = 0  # id of the latest open request; older results are dropped
         self.status = QLabel(engine.device_name())
 
         top = QHBoxLayout()
@@ -252,6 +268,14 @@ class MainWindow(QMainWindow):
         self.worker.finished.connect(self.on_finished)
         self.worker.failed.connect(self.on_failed)
         self.thread.start()
+
+        self.load_thread = QThread(self)
+        self.loader = Loader()
+        self.loader.moveToThread(self.load_thread)
+        self.start_load.connect(self.loader.load)
+        self.loader.loaded.connect(self.on_loaded)
+        self.loader.failed.connect(self.on_load_failed)
+        self.load_thread.start()
 
         self.refresh = QTimer(self)
         self.refresh.setInterval(400)
@@ -429,17 +453,15 @@ class MainWindow(QMainWindow):
         if enhance:
             self.update_pipeline()
 
-    def on_rendered(self, rgb: np.ndarray):
+    def on_rendered(self, rgb: np.ndarray, hist: tuple, frac: float):
         note = ""
         if self.photo is not None and self.photo.meta.get("raw") and self.view.mode == "develop":
-            small = self.view.proxy_linear()
-            frac = develop.beyond_white(small, self.dev_params, self.photo.baseline_ev) if small is not None else 0
             if frac >= 0.002:
                 if self.dev_params["highlights"] < 0:
                     note = f"Highlights is recovering RAW detail past white ({frac * 100:.1f}%)"
                 else:
                     note = f"RAW has detail past white ({frac * 100:.1f}%): pull Highlights left"
-        self.hist.set_image(rgb, note)
+        self.hist.set_histogram(hist, note)
 
     # --- presets ----------------------------------------------------------
     def settings(self) -> dict:
@@ -550,21 +572,33 @@ class MainWindow(QMainWindow):
         if path:
             self.open_path(Path(path))
 
+    @property
+    def loading(self) -> bool:
+        return self.view.is_loading()
+
     def open_path(self, path: Path):
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            photo = imageio.load(path)
-        except Exception as e:
-            QMessageBox.warning(self, "Could not open", str(e))
+        """Start loading a photo; on_loaded takes over when it's decoded."""
+        self.load_req += 1
+        self.view.set_loading(f"Loading {path.name}…")
+        self.start_load.emit(self.load_req, path)
+
+    def on_load_failed(self, req: int, name: str, msg: str):
+        if req != self.load_req:
             return
-        finally:
-            QApplication.restoreOverrideCursor()
+        self.view.set_loading(None)
+        QMessageBox.warning(self, "Could not open", f"{name}: {msg}")
+
+    def on_loaded(self, req: int, photo: imageio.Photo, g: float):
+        if req != self.load_req:
+            return  # another photo was opened meanwhile
+        self.view.set_loading(None)
+        path = photo.path
         if self.busy:
             self.worker.cancel = True
             self.pending = True
         self.photo = photo
         self.photo_gen += 1
-        self.g = pipeline.ai_scale(photo.linear, photo.baseline_ev)
+        self.g = g
         self.enc_orig = None
         self.results.clear()
         self.running.clear()
@@ -759,6 +793,9 @@ class MainWindow(QMainWindow):
         self.worker.cancel = True
         self.thread.quit()
         self.thread.wait(5000)
+        self.load_thread.quit()
+        self.load_thread.wait(5000)
+        self.view.shutdown()
         super().closeEvent(e)
 
 

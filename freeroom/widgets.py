@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import QSlider, QWidget
+from PySide6.QtWidgets import QLabel, QProgressBar, QSlider, QVBoxLayout, QWidget
 
 from . import develop, pipeline
 
@@ -32,6 +32,18 @@ class ResetSlider(QSlider):
         e.accept()
 
 
+class _Renderer(QObject):
+    """Renders the screen-size view off the GUI thread, so sliders stay smooth."""
+
+    done = Signal(object, object, object, float)  # QImage, rgb, histogram, beyond-white fraction
+
+    def render(self, job):
+        render, dpr, bw_params = job
+        out = render()
+        bw = develop.beyond_white(*bw_params) if bw_params else 0.0
+        self.done.emit(to_qimage(out, dpr), out, develop.histogram(out[::2, ::2]), bw)
+
+
 class PhotoView(QWidget):
     """Fit-to-window preview with a circular 100% loupe under the mouse.
 
@@ -42,7 +54,9 @@ class PhotoView(QWidget):
       "enhance": developed photo + AI layers (before = developed photo)
     """
 
-    rendered = Signal(object)  # screen-size result, for the histogram
+    # screen-size result, its histogram, fraction of RAW data past white (develop mode)
+    rendered = Signal(object, object, float)
+    _request = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -68,6 +82,51 @@ class PhotoView(QWidget):
         self._view_img: QImage | None = None
         self._view_orig: QImage | None = None
         self._rect = QRectF()
+        # Loading overlay in the middle of the view (busy bar: decoders don't report progress)
+        self._loading = QWidget(self)
+        self._loading_text = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        self._loading_text.setStyleSheet("color: #ddd; font-size: 12pt; background: transparent;")
+        bar = QProgressBar()
+        bar.setRange(0, 0)
+        bar.setTextVisible(False)
+        bar.setFixedSize(320, 14)
+        lay = QVBoxLayout(self._loading)
+        lay.addWidget(self._loading_text)
+        lay.addWidget(bar, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._loading.setStyleSheet("QWidget { background: rgba(20, 20, 22, 210); border-radius: 8px; }")
+        self._loading.hide()
+        # Background rendering: at most one job at a time; changes meanwhile
+        # mark it dirty and the newest state is rendered when the job ends.
+        self._rendering = False
+        self._dirty = False
+        self._render_thread = QThread(self)
+        self._renderer = _Renderer()
+        self._renderer.moveToThread(self._render_thread)
+        self._request.connect(self._renderer.render)
+        self._renderer.done.connect(self._render_done)
+        self._render_thread.start()
+
+    def shutdown(self):
+        self._render_thread.quit()
+        self._render_thread.wait(5000)
+
+    def set_loading(self, text: str | None):
+        """Show (text) or hide (None) the loading overlay."""
+        if text is None:
+            self._loading.hide()
+        else:
+            self._loading_text.setText(text)
+            self._loading.adjustSize()
+            self._place_loading()
+            self._loading.show()
+        self.update()
+
+    def is_loading(self) -> bool:
+        return self._loading.isVisible()
+
+    def _place_loading(self):
+        w = self._loading
+        w.move((self.width() - w.width()) // 2, (self.height() - w.height()) // 2)
 
     # --- data -----------------------------------------------------------
     def set_linear(self, linear: np.ndarray, baseline_ev: float, g: float):
@@ -103,10 +162,6 @@ class PhotoView(QWidget):
         self._small.pop("sharp", None)
         if self.mode == "enhance":
             self._rebuild_small()
-
-    def proxy_linear(self) -> np.ndarray | None:
-        """The screen-size linear photo (cheap stand-in for statistics)."""
-        return self._small.get("linear")
 
     def _target_rect(self) -> QRectF:
         h, w, _ = self.linear.shape
@@ -153,14 +208,29 @@ class PhotoView(QWidget):
         return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut, base)
 
     def _render_view(self):
+        """Ask for the view to be re-rendered (in the background, newest state wins)."""
         if "linear" not in self._small:
             return
-        sm = self._small
-        out = self._render(sm["linear"], sm.get("dn"), sm.get("sharp"), original=False)
-        self._view_img = to_qimage(out, self.devicePixelRatioF())
+        self._dirty = True
+        if not self._rendering:
+            self._start_render()
+
+    def _start_render(self):
+        self._dirty = False
+        self._rendering = True
+        sm = dict(self._small)
+        lin, dn, sharp = sm["linear"], sm.get("dn"), sm.get("sharp")
+        bw = (lin, dict(self.dev_params), self.baseline_ev) if self.mode == "develop" else None
+        self._request.emit((lambda: self._render(lin, dn, sharp, original=False), self.devicePixelRatioF(), bw))
+
+    def _render_done(self, img: QImage, out: np.ndarray, hist, beyond_white: float):
+        self._rendering = False
+        self._view_img = img
         self._view_orig = None  # made on demand
-        self.rendered.emit(out)
+        self.rendered.emit(out, hist, beyond_white)
         self.update()
+        if self._dirty:
+            self._start_render()
 
     def _original_image(self) -> QImage:
         if self._view_orig is None:
@@ -169,6 +239,7 @@ class PhotoView(QWidget):
         return self._view_orig
 
     def resizeEvent(self, e):
+        self._place_loading()
         self._rebuild_small()
 
     # --- painting -------------------------------------------------------
@@ -176,6 +247,8 @@ class PhotoView(QWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), QColor(30, 30, 32))
         if self._view_img is None:
+            if self.is_loading():
+                return
             p.setPen(QColor(150, 150, 150))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Open a photo (Ctrl+O) or drop one here")
             return
@@ -283,7 +356,11 @@ class Histogram(QWidget):
         self.note = ""
 
     def set_image(self, rgb: np.ndarray, note: str = ""):
-        self.hist, self.clip_lo, self.clip_hi = develop.histogram(rgb[::2, ::2])
+        self.set_histogram(develop.histogram(rgb[::2, ::2]), note)
+
+    def set_histogram(self, hist: tuple, note: str = ""):
+        """hist = develop.histogram() result (computed off the GUI thread)."""
+        self.hist, self.clip_lo, self.clip_hi = hist
         self.note = note
         self.update()
 

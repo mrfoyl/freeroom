@@ -76,7 +76,7 @@ def wait(cond=lambda: not win.busy, limit=180):
     for _ in range(5): qapp.processEvents()
     return f"{time.time()-t0:.1f}s"
 
-win.open_path(raw_path or src)
+win.open_path(raw_path or src); print("loading bar shown:", win.loading, "load:", wait(lambda: not win.loading))
 win.sliders["exposure"][0].setValue(30); win.sliders["shadows"][0].setValue(40); win.sliders["highlights"][0].setValue(-50)
 print("dev tab, AI not run:", not win.results and not win.busy)
 win.view.mouse = QPointF(win.view.width() * 0.45, win.view.height() * 0.5); win.view.update(); qapp.processEvents()
@@ -98,7 +98,7 @@ from freeroom import pipeline as pl
 sm = win.view._small
 ref = pl.compose(sm["linear"], sm.get("dn"), sm.get("sharp"), win.g, win.dev_params, win.photo.baseline_ev, win.effective_enh())
 print("view == compose with current dials:", ref.shape, sm.get("dn") is not None and sm.get("sharp") is not None)
-gen = win.photo_gen; win.open_path(raw_path or src); print("reopen photo -> AI runs again:", win.busy, wait(), "old results dropped:", all(k[0] != gen for k in win.results))
+gen = win.photo_gen; win.open_path(raw_path or src); wait(lambda: not win.loading); print("reopen photo -> AI runs again:", win.busy, wait(), "old results dropped:", all(k[0] != gen for k in win.results))
 
 # presets
 win.preset_box.setCurrentIndex(0)
