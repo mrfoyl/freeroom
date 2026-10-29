@@ -86,7 +86,7 @@ class PhotoView(QWidget):
         self._loading = QWidget(self)
         self._loading_text = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         self._loading_text.setStyleSheet("color: #ddd; font-size: 12pt; background: transparent;")
-        bar = QProgressBar()
+        self._loading_bar = bar = QProgressBar()
         bar.setRange(0, 0)
         bar.setTextVisible(False)
         bar.setFixedSize(320, 14)
@@ -111,10 +111,19 @@ class PhotoView(QWidget):
         self._render_thread.wait(5000)
 
     def set_loading(self, text: str | None):
-        """Show (text) or hide (None) the loading overlay."""
+        """Show (text) or hide (None) the overlay with a busy bar."""
+        self.set_progress(text, None)
+
+    def set_progress(self, text: str | None, percent: int | None = None):
+        """Show (text) or hide (None) the overlay; percent None = busy bar."""
         if text is None:
             self._loading.hide()
         else:
+            if percent is None:
+                self._loading_bar.setRange(0, 0)
+            else:
+                self._loading_bar.setRange(0, 100)
+                self._loading_bar.setValue(percent)
             self._loading_text.setText(text)
             self._loading.adjustSize()
             self._place_loading()

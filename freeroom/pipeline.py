@@ -12,6 +12,8 @@ clips; the few brightest pixels that do clip fall back to the original.
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 
 from . import develop, engine
@@ -53,11 +55,14 @@ def compose(
     enh_params: dict,
     lut: np.ndarray | None = None,
     base: np.ndarray | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> np.ndarray:
     """Final display image: develop original + AI layers, then blend them.
 
     dn / sharp are AI outputs in the encoding (None = that step is off).
-    base = HDR base layer for these pixels (None: `linear` is the whole photo)."""
+    base = HDR base layer for these pixels (None: `linear` is the whole photo).
+    progress(label) is called before each step (see compose_steps)."""
+    step = progress or (lambda label: None)
     if lut is None:
         lut = develop.build_lut(dev_params)
     if base is None and dev_params.get("hdr"):
@@ -67,7 +72,19 @@ def compose(
     def dev(x):
         return develop.develop(x, dev_params, baseline_ev, lut, base)
 
+    step("Developing")
     orig = dev(linear)
-    ai = dev(decode(dn, g, linear)) if dn is not None else orig
-    sh = dev(decode(sharp, g, linear)) if sharp is not None else None
-    return engine.adjust(orig, ai, sh, **enh_params)
+    ai = sh = None
+    if dn is not None:
+        step("Developing denoised layer")
+        ai = dev(decode(dn, g, linear))
+    if sharp is not None:
+        step("Developing sharpened layer")
+        sh = dev(decode(sharp, g, linear))
+    step("Blending enhancement")
+    return engine.adjust(orig, orig if ai is None else ai, sh, **enh_params)
+
+
+def compose_steps(dn: np.ndarray | None, sharp: np.ndarray | None) -> int:
+    """How many times compose() calls progress."""
+    return 2 + (dn is not None) + (sharp is not None)

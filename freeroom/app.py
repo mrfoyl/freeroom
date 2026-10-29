@@ -150,9 +150,37 @@ class Loader(QObject):
             self.failed.emit(req, path.name, str(e))
 
 
+class Saver(QObject):
+    """Develops the full-size photo and writes it, off the GUI thread."""
+
+    progress = Signal(int, int, str)  # step done, steps, label of the step starting
+    saved = Signal(str)
+    failed = Signal(str)
+
+    def save(self, job: dict):
+        try:
+            total = pipeline.compose_steps(job["dn"], job["sharp"]) + 1
+            done = [0]
+
+            def step(label):
+                self.progress.emit(done[0], total, label)
+                done[0] += 1
+
+            rgb = pipeline.compose(
+                job["photo"].linear, job["dn"], job["sharp"], job["g"], job["dev"],
+                job["photo"].baseline_ev, job["enh"], progress=step,
+            )
+            step(f"Writing {job['out'].name}")
+            saved = imageio.save(job["photo"], rgb, job["out"])
+            self.saved.emit(str(saved))
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class MainWindow(QMainWindow):
     start_job = Signal(object)
     start_load = Signal(int, object)
+    start_save = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -209,6 +237,7 @@ class MainWindow(QMainWindow):
         self.cancel_btn.clicked.connect(self.cancel_job)
         self.cancel_btn.hide()
         self.load_req = 0  # id of the latest open request; older results are dropped
+        self.load_text: str | None = None  # overlay text while a photo is loading
         self.status = QLabel(engine.device_name())
 
         top = QHBoxLayout()
@@ -275,6 +304,13 @@ class MainWindow(QMainWindow):
         self.start_load.connect(self.loader.load)
         self.loader.loaded.connect(self.on_loaded)
         self.loader.failed.connect(self.on_load_failed)
+        self.saver = Saver()  # shares the loader's thread: file work, one at a time
+        self.saver.moveToThread(self.load_thread)
+        self.start_save.connect(self.saver.save)
+        self.saver.progress.connect(self.on_save_progress)
+        self.saver.saved.connect(self.on_saved)
+        self.saver.failed.connect(self.on_save_failed)
+        self.saving = False
         self.load_thread.start()
 
         self.refresh = QTimer(self)
@@ -574,24 +610,30 @@ class MainWindow(QMainWindow):
 
     @property
     def loading(self) -> bool:
-        return self.view.is_loading()
+        return self.load_text is not None
 
     def open_path(self, path: Path):
         """Start loading a photo; on_loaded takes over when it's decoded."""
         self.load_req += 1
-        self.view.set_loading(f"Loading {path.name}…")
+        self.load_text = f"Loading {path.name}…"
+        if not self.saving:  # else it shows once the save is done (same thread)
+            self.view.set_loading(self.load_text)
         self.start_load.emit(self.load_req, path)
 
     def on_load_failed(self, req: int, name: str, msg: str):
         if req != self.load_req:
             return
-        self.view.set_loading(None)
+        self.load_text = None
+        if not self.saving:
+            self.view.set_loading(None)
         QMessageBox.warning(self, "Could not open", f"{name}: {msg}")
 
     def on_loaded(self, req: int, photo: imageio.Photo, g: float):
         if req != self.load_req:
             return  # another photo was opened meanwhile
-        self.view.set_loading(None)
+        self.load_text = None
+        if not self.saving:
+            self.view.set_loading(None)
         path = photo.path
         if self.busy:
             self.worker.cancel = True
@@ -734,7 +776,7 @@ class MainWindow(QMainWindow):
 
     # --- save -----------------------------------------------------------
     def save_dialog(self):
-        if self.photo is None:
+        if self.photo is None or self.saving:
             return
         SAVE_DIR.mkdir(parents=True, exist_ok=True)
         suggested = SAVE_DIR / f"{self.photo.path.stem}_edit.jpg"
@@ -758,26 +800,34 @@ class MainWindow(QMainWindow):
         self.update_pipeline()
 
     def _do_save(self):
+        """Hand the full-size develop + write to the saver thread, with the
+        settings as they are now (changing sliders meanwhile doesn't affect it)."""
         out, self.save_target = self.save_target, None
         dn_key, sh_key = self._keys()
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            rgb = pipeline.compose(
-                self.photo.linear,
-                self.results.get(dn_key),
-                self.results.get(sh_key),
-                self.g,
-                self.dev_params,
-                self.photo.baseline_ev,
-                self.effective_enh(),
-            )
-            saved = imageio.save(self.photo, rgb, out)
-        except Exception as e:
-            QMessageBox.warning(self, "Could not save", str(e))
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-        self.status.setText(f"Saved {saved}")
+        self.saving = True
+        self.save_btn.setEnabled(False)
+        self.view.set_progress(f"Saving {out.name}…", 0)
+        self.start_save.emit({
+            "photo": self.photo, "out": out, "g": self.g,
+            "dn": self.results.get(dn_key), "sharp": self.results.get(sh_key),
+            "dev": dict(self.dev_params), "enh": self.effective_enh(),
+        })
+
+    def on_save_progress(self, done: int, total: int, label: str):
+        self.view.set_progress(f"Saving: {label}…", round(100 * done / total))
+
+    def _save_ended(self):
+        self.saving = False
+        self.save_btn.setEnabled(self.photo is not None)
+        self.view.set_loading(self.load_text)  # a photo opened meanwhile, or None
+
+    def on_saved(self, path: str):
+        self._save_ended()
+        self.status.setText(f"Saved {path}")
+
+    def on_save_failed(self, msg: str):
+        self._save_ended()
+        QMessageBox.warning(self, "Could not save", msg)
 
     # --- drag & drop ----------------------------------------------------
     def dragEnterEvent(self, e):
