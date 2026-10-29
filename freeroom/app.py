@@ -1,6 +1,7 @@
 """Freeroom GUI: open a photo, develop it, enhance it with AI, save.
 
-Raw development tab: instant, per-pixel dials on the linear photo.
+Raw tab: instant, per-pixel dials on the linear photo.
+HDR and B&W tabs: more development, applied after the Raw tab.
 Enhancement tab: AI denoise + sharpen, shown on top of the development.
 Each AI model runs at most once per photo; its result is kept and the dials
 are applied on top (see pipeline.py), so only a new photo re-runs the AI.
@@ -30,6 +31,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSlider,
     QTabWidget,
     QVBoxLayout,
@@ -49,11 +51,26 @@ DEV_LIGHT = [
     ("shadows", "Shadows", -100, 100, 0, lambda v: f"{v:+d}"),
     ("midtones", "Midtones", -100, 100, 0, lambda v: f"{v:+d}"),
     ("highlights", "Highlights", -100, 100, 0, lambda v: f"{v:+d}"),
+    ("contrast", "Contrast", -100, 100, 0, lambda v: f"{v:+d}"),
 ]
 DEV_COLOUR = [
     ("temperature", "Temperature", -100, 100, 0, lambda v: f"{v:+d}"),
     ("tint", "Tint", -100, 100, 0, lambda v: f"{v:+d}"),
     ("saturation", "Saturation", -100, 100, 0, lambda v: f"{v:+d}"),
+]
+DEV_HDR = [
+    ("hdr_compress", "Compression", 0, 100, 50, lambda v: f"{v}%"),
+    ("hdr_detail", "Local detail", -100, 100, 30, lambda v: f"{v:+d}"),
+]
+BW_SWATCH = {"red": "#e04040", "orange": "#f08a24", "yellow": "#e8d030", "green": "#40b050",
+             "aqua": "#30c0c0", "blue": "#4070e0", "purple": "#8a50d0", "magenta": "#d040b0"}
+# per colour: its slider, then High / Low underneath
+DEV_BW = [
+    (f"bw_{name}{part}",
+     f"<span style='color:{BW_SWATCH[name]}'>■</span> {name.capitalize()}" if not part
+     else ("      High" if part == "_hi" else "      Low"),
+     -100, 100, 0, lambda v: f"{v:+d}")
+    for name, _ in develop.BW_COLOURS for part in develop.BW_PARTS
 ]
 PCT = lambda v: f"{v}%"  # noqa: E731
 ENH_NR = [
@@ -64,9 +81,12 @@ ENH_SH = [
     ("ai_sharpen", "AI sharpen", 0, 150, 70, PCT),  # >100% exaggerates the deblur model
     ("sharpen", "Classic sharpen", 0, 100, 15, PCT),
 ]
-DEV_KEYS = [s[0] for s in DEV_LIGHT + DEV_COLOUR]
+RAW_KEYS = [s[0] for s in DEV_LIGHT + DEV_COLOUR]
+HDR_KEYS = [s[0] for s in DEV_HDR]
+BW_KEYS = [s[0] for s in DEV_BW]
+DEV_KEYS = RAW_KEYS + HDR_KEYS + BW_KEYS
 ENH_KEYS = [s[0] for s in ENH_NR + ENH_SH]
-SLIDER_DEFAULTS = {s[0]: s[4] for s in DEV_LIGHT + DEV_COLOUR + ENH_NR + ENH_SH}
+SLIDER_DEFAULTS = {s[0]: s[4] for s in DEV_LIGHT + DEV_COLOUR + DEV_HDR + DEV_BW + ENH_NR + ENH_SH}
 
 GROUP_STYLE = (
     "QGroupBox { font-weight: bold; font-size: 11pt; margin-top: 8px; padding-top: 10px; }"
@@ -137,6 +157,7 @@ class MainWindow(QMainWindow):
         self.started: set[tuple] = set()
         self.busy = False
         self.pending = False
+        self.cancelled = False  # the user stopped the running job: don't restart it by itself
         self.save_target: Path | None = None
         self._applying = False  # loading a preset: hold back pipeline runs
 
@@ -167,6 +188,10 @@ class MainWindow(QMainWindow):
         self.progress.setMaximumWidth(220)
         self.progress.setTextVisible(True)
         self.progress.hide()
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setToolTip("Stop the AI denoise / sharpen run (after the current tile)")
+        self.cancel_btn.clicked.connect(self.cancel_job)
+        self.cancel_btn.hide()
         self.status = QLabel(engine.device_name())
 
         top = QHBoxLayout()
@@ -175,10 +200,13 @@ class MainWindow(QMainWindow):
         top.addStretch(1)
         top.addWidget(self.status)
         top.addWidget(self.progress)
+        top.addWidget(self.cancel_btn)
 
         # --- tabs
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_develop_tab(), "Raw development")
+        self.tabs.addTab(self._build_develop_tab(), "Raw")
+        self.tabs.addTab(self._build_hdr_tab(), "HDR")
+        self.tabs.addTab(self._build_bw_tab(), "B&&W")
         self.enh_tab = self._build_enhance_tab()
         self.tabs.addTab(self.enh_tab, "Enhancement")
         self.tabs.currentChanged.connect(self.tab_changed)
@@ -187,7 +215,7 @@ class MainWindow(QMainWindow):
             "<b>Loupe</b> = 100% (1 photo pixel = 1 screen pixel).<br>"
             "Hold mouse button: before, in loupe · Hold Space: before, everywhere · "
             "Scroll: loupe size.<br>"
-            "<i>Before</i> = as shot on the development tab, unenhanced on the enhancement tab."
+            "<i>Before</i> = as shot on the Raw, HDR and B&amp;W tabs, unenhanced on the Enhancement tab."
         )
         hint.setStyleSheet("color: #999;")
         hint.setWordWrap(True)
@@ -195,9 +223,8 @@ class MainWindow(QMainWindow):
         side = QVBoxLayout()
         side.addWidget(QLabel("<b>Range</b> (R G B)"))
         side.addWidget(self.hist)
-        side.addWidget(self.tabs)
+        side.addWidget(self.tabs, 1)
         side.addWidget(hint)
-        side.addStretch(1)
         side_w = QWidget()
         side_w.setLayout(side)
         side_w.setFixedWidth(360)
@@ -264,7 +291,7 @@ class MainWindow(QMainWindow):
         for spec in DEV_COLOUR:
             self._add_slider(form, spec, self.dev_changed)
         reset = QPushButton("Reset development")
-        reset.clicked.connect(lambda: self._reset(DEV_KEYS))
+        reset.clicked.connect(lambda: self._reset(RAW_KEYS))
         tab = QWidget()
         lay = QVBoxLayout(tab)
         lay.addWidget(light)
@@ -272,6 +299,67 @@ class MainWindow(QMainWindow):
         lay.addWidget(reset)
         lay.addStretch(1)
         return tab
+
+    def _dev_group(self, title: str, flag: str) -> QGroupBox:
+        """Checkable section that switches a development step (dev_params[flag]) on/off."""
+        group = QGroupBox(title)
+        group.setCheckable(True)
+        group.setChecked(bool(develop.DEFAULTS[flag]))
+
+        def toggled(on):
+            self.dev_params[flag] = on
+            self.view.set_dev_params(self.dev_params)
+
+        group.toggled.connect(toggled)
+        return group
+
+    def _build_hdr_tab(self) -> QWidget:
+        self.hdr_group = self._dev_group("HDR tone mapping", "hdr")
+        form = QFormLayout(self.hdr_group)
+        for spec in DEV_HDR:
+            self._add_slider(form, spec, self.dev_changed)
+        reset = QPushButton("Reset HDR")
+        reset.clicked.connect(lambda: self._reset(HDR_KEYS))
+        note = QLabel(
+            "Squeezes a high-contrast scene into the picture: <i>Compression</i> lifts "
+            "shadows and pulls highlights down area by area, <i>Local detail</i> brings "
+            "back (or tames) texture and local contrast. Works best on RAW files."
+        )
+        note.setStyleSheet("color: #999;")
+        note.setWordWrap(True)
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.addWidget(self.hdr_group)
+        lay.addWidget(reset)
+        lay.addWidget(note)
+        lay.addStretch(1)
+        return tab
+
+    def _build_bw_tab(self) -> QWidget:
+        self.bw_group = self._dev_group("Black && white", "bw")
+        form = QFormLayout(self.bw_group)
+        for spec in DEV_BW:
+            self._add_slider(form, spec, self.dev_changed)
+        reset = QPushButton("Reset colour mix")
+        reset.clicked.connect(lambda: self._reset(BW_KEYS))
+        note = QLabel(
+            "Each colour slider makes that colour lighter or darker in the black & white "
+            "image; <i>High</i> / <i>Low</i> do the same only where it is bright / dark."
+        )
+        note.setStyleSheet("color: #999;")
+        note.setWordWrap(True)
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.addWidget(self.bw_group)
+        lay.addWidget(reset)
+        lay.addWidget(note)
+        lay.addStretch(1)
+        scroll = QScrollArea()  # 24 sliders don't fit the side panel
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(inner)
+        return scroll
 
     def _build_enhance_tab(self) -> QWidget:
         self.denoise_box = QComboBox()
@@ -404,8 +492,11 @@ class MainWindow(QMainWindow):
 
         self._applying = True
         try:
+            dev = s.get("development", {})
             for key in DEV_KEYS:
-                set_slider(key, s.get("development", {}).get(key, develop.DEFAULTS[key]))
+                set_slider(key, dev.get(key, develop.DEFAULTS[key]))
+            self.hdr_group.setChecked(bool(dev.get("hdr", develop.DEFAULTS["hdr"])))
+            self.bw_group.setChecked(bool(dev.get("bw", develop.DEFAULTS["bw"])))
             enh = s.get("enhancement", {})
             for group, box, section in (
                 (self.nr_group, self.denoise_box, enh.get("noise_reduction", {})),
@@ -554,9 +645,12 @@ class MainWindow(QMainWindow):
                 self._do_save()
             return
         self.worker.cancel = False
+        self.cancelled = False
         self.busy = True
         self.progress.setValue(0)
         self.progress.show()
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.show()
         self.refresh.start()
         self._show_layers()
         self.start_job.emit(stages)
@@ -580,10 +674,21 @@ class MainWindow(QMainWindow):
         self.progress.setValue(done)
         self.progress.setFormat(f"tile {done}/{total}")
 
+    def cancel_job(self):
+        if not self.busy:
+            return
+        self.worker.cancel = True
+        self.cancelled = True
+        self.pending = False
+        self.save_target = None  # a save waiting for this run is dropped too
+        self.cancel_btn.setEnabled(False)
+        self.status.setText("Cancelling after the current tile…")
+
     def _job_ended(self):
         self.busy = False
         self.refresh.stop()
         self.progress.hide()
+        self.cancel_btn.hide()
         self.running.clear()
         self.started.clear()
 
@@ -591,8 +696,11 @@ class MainWindow(QMainWindow):
         self._job_ended()
         if ok:
             self.status.setText(f"Done in {seconds:.1f} s · {engine.device_name()}")
-        self.pending = False
+        asked_again, self.pending = self.pending, False
         self._show_layers()
+        if self.cancelled and not ok and not asked_again:
+            self.status.setText("Cancelled. Change a model or reopen the Enhancement tab to run it again.")
+            return
         self.update_pipeline()
 
     def on_failed(self, msg: str):

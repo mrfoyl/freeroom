@@ -52,15 +52,20 @@ def compose(
     baseline_ev: float,
     enh_params: dict,
     lut: np.ndarray | None = None,
+    base: np.ndarray | None = None,
 ) -> np.ndarray:
     """Final display image: develop original + AI layers, then blend them.
 
-    dn / sharp are AI outputs in the encoding (None = that step is off)."""
+    dn / sharp are AI outputs in the encoding (None = that step is off).
+    base = HDR base layer for these pixels (None: `linear` is the whole photo)."""
     if lut is None:
         lut = develop.build_lut(dev_params)
+    if base is None and dev_params.get("hdr"):
+        # from the original for all layers, so HDR treats them alike
+        base = develop.hdr_base(develop.hdr_map(linear), linear.shape, linear.shape)
 
     def dev(x):
-        return develop.develop(x, dev_params, baseline_ev, lut)
+        return develop.develop(x, dev_params, baseline_ev, lut, base)
 
     orig = dev(linear)
     ai = dev(decode(dn, g, linear)) if dn is not None else orig

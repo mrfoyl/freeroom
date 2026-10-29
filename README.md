@@ -4,12 +4,20 @@ Simple RAW development + local AI noise reduction / sharpening on the GPU
 (SCUNet and Restormer via spandrel + CUDA PyTorch), in its own `freeroom`
 distrobox.
 
-Two tabs, applied in this order:
-1. **Raw development**: exposure, shadows, midtones, highlights, temperature,
+Four tabs, applied in this order:
+1. **Raw**: exposure, shadows, midtones, highlights, contrast, temperature,
    tint, saturation. RAW files load scene-linear (rawpy, camera WB) with an
    automatic base exposure; Highlights left rolls RAW data past white back
    into range. Per-pixel only, so it's instant. A JPEG at defaults is unchanged.
-2. **Enhancement**: the AI steps below, shown on top of the development.
+2. **HDR** (off by default): single-photo local tone mapping. Compression pulls
+   the large-scale brightness towards mid grey (shadows up, highlights down),
+   Local detail scales the texture on top. Works from an edge-preserving
+   low-res brightness map of the whole photo, so the loupe matches the result.
+3. **B&W** (off by default): black & white with a colour mixer. Per colour
+   (red, orange, yellow, green, aqua, blue, purple, magenta) a slider makes
+   that colour lighter/darker, with **High** / **Low** underneath doing the
+   same only in its bright / dark parts. Greys are never changed.
+4. **Enhancement**: the AI steps below, shown on top of the development.
    Each section can be switched off.
 
 Each AI model runs **at most once per photo** (when you first view it on the
@@ -18,6 +26,8 @@ linear photo, not on the developed one, so their results are kept and the
 dials are applied on top afterwards: changing development, switching tabs,
 toggling sections or going back to a model you already tried is instant.
 Only a new photo (or a model not yet tried on this one) runs the AI again.
+**Cancel** (next to the progress bar) stops a run after the current tile;
+it then waits until you change a model or reopen the Enhancement tab.
 
 The RGB range view (histogram) above the tabs shows the current result, with
 clip markers and a note when a RAW has highlight data past white.

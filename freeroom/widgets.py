@@ -45,6 +45,7 @@ class PhotoView(QWidget):
         self.dev_params = dict(develop.DEFAULTS)
         self.enh_params: dict = {}
         self._lut = self._default_lut = develop.build_lut(develop.DEFAULTS)
+        self._hdr_map: np.ndarray | None = None  # of the full photo, made when HDR is first on
         # view state
         self.radius = 160
         self.mouse: QPointF | None = None
@@ -59,6 +60,7 @@ class PhotoView(QWidget):
     def set_linear(self, linear: np.ndarray, baseline_ev: float, g: float):
         self.linear, self.baseline_ev, self.g = linear, baseline_ev, g
         self.dn = self.sharp = None
+        self._hdr_map = None
         self._small = {}
         self._rebuild_small()
 
@@ -118,17 +120,24 @@ class PhotoView(QWidget):
             small("sharp", self.sharp)
         self._render_view()
 
-    def _render(self, lin, dn, sharp, original: bool) -> np.ndarray:
-        """Render one region (proxy or loupe crop) in the current mode."""
-        if self.mode == "enhance":
-            if original:
-                return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut)
-            return pipeline.compose(
-                lin, dn, sharp, self.g, self.dev_params, self.baseline_ev, self.enh_params, self._lut
-            )
-        if original:
+    def _base(self, out_shape, region) -> np.ndarray | None:
+        """HDR base layer for a region of the full photo (None = all of it)."""
+        if not self.dev_params.get("hdr"):
+            return None
+        if self._hdr_map is None:
+            self._hdr_map = develop.hdr_map(self.linear)
+        return develop.hdr_base(self._hdr_map, self.linear.shape, out_shape, region)
+
+    def _render(self, lin, dn, sharp, original: bool, region: tuple | None = None) -> np.ndarray:
+        """Render one region (proxy, or loupe crop at `region` = y0, x0, y1, x1) in the current mode."""
+        if self.mode == "develop" and original:
             return develop.develop(lin, develop.DEFAULTS, self.baseline_ev, self._default_lut)
-        return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut)
+        base = self._base(lin.shape, region)
+        if self.mode == "enhance" and not original:
+            return pipeline.compose(
+                lin, dn, sharp, self.g, self.dev_params, self.baseline_ev, self.enh_params, self._lut, base
+            )
+        return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut, base)
 
     def _render_view(self):
         if "linear" not in self._small:
@@ -181,6 +190,7 @@ class PhotoView(QWidget):
             None if self.dn is None else self.dn[region],
             None if self.sharp is None else self.sharp[region],
             original,
+            (ey0, ex0, ey1, ex1),
         )
         crop = crop[iy0 - ey0 : iy1 - ey0, ix0 - ex0 : ix1 - ex0]
         if crop.size == 0:
