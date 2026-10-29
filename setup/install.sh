@@ -5,10 +5,12 @@
 #   setup/install.sh            auto: distrobox if installed, else native
 #   setup/install.sh --box      in the "freeroom" distrobox (Fedora; Bazzite etc.)
 #   setup/install.sh --native   directly on this system
-#   setup/install.sh --cpu      force the CPU PyTorch build (also: --cu128)
+#   setup/install.sh --cpu      force the CPU PyTorch build (also: --cu128, --rocm)
 #
-# PyTorch: CUDA 12.8 build when an NVIDIA GPU is found (nvidia-smi), otherwise
-# the much smaller CPU build. The choice is saved in .install for freeroom.sh.
+# PyTorch: CUDA 12.8 build when an NVIDIA GPU is found (nvidia-smi), ROCm 6.4
+# when an AMD GPU that build supports is found (from sysfs, no ROCm tools
+# needed), otherwise the much smaller CPU build. The choice is saved in
+# .install for freeroom.sh.
 #
 # macOS (Apple Silicon only): always native; the "cpu" build there is the
 # standard macOS PyTorch, which uses the Apple GPU through Metal.
@@ -24,6 +26,7 @@ for arg in "$@"; do
     --native) MODE=native ;;
     --cpu) EXTRA=cpu ;;
     --cu128) EXTRA=cu128 ;;
+    --rocm) EXTRA=rocm ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -33,7 +36,7 @@ if [ "$(uname -s)" = Darwin ]; then
     echo "Intel Macs aren't supported: PyTorch 2.8 is only built for Apple Silicon (M1 or newer)." >&2
     exit 1
   fi
-  if [ "$MODE" = box ] || [ "$EXTRA" = cu128 ]; then
+  if [ "$MODE" = box ] || [ "$EXTRA" = cu128 ] || [ "$EXTRA" = rocm ]; then
     echo "On macOS only a native install with the Metal (cpu) build is possible." >&2
     exit 2
   fi
@@ -42,14 +45,44 @@ if [ "$(uname -s)" = Darwin ]; then
   echo "Apple Silicon Mac: PyTorch with Metal GPU support."
 fi
 
+# AMD GPUs (gfx names) the ROCm 6.4 PyTorch build really runs on: its own
+# kernels and rocBLAS's both (gfx900/906 have PyTorch kernels but no rocBLAS)
+ROCM_TARGETS="gfx908 gfx90a gfx942 gfx1030 gfx1100 gfx1101 gfx1102 gfx1200 gfx1201"
+amd_gpus() {  # gfx name of each AMD GPU the kernel driver exposes for compute
+  local f v
+  for f in "${FREEROOM_KFD_NODES:-/sys/class/kfd/kfd/topology/nodes}"/*/properties; do
+    [ -f "$f" ] || continue
+    v="$(sed -n 's/^gfx_target_version //p' "$f")"
+    # e.g. 110000 -> gfx1100, 90012 -> gfx90c (major, then minor and stepping in hex)
+    [ -n "$v" ] && [ "$v" != 0 ] && printf 'gfx%d%x%x\n' $((v / 10000)) $((v / 100 % 100)) $((v % 100))
+  done
+  return 0
+}
+
 if [ -z "$EXTRA" ]; then
   if command -v nvidia-smi >/dev/null && nvidia-smi -L >/dev/null 2>&1; then
     EXTRA=cu128
     echo "NVIDIA GPU found: $(nvidia-smi -L | head -1)"
   else
     EXTRA=cpu
-    echo "No NVIDIA GPU found: using the CPU build (AI steps will be slow)."
+    AMD=""
+    for g in $(amd_gpus); do
+      AMD="${AMD:-$g}"
+      case " $ROCM_TARGETS " in *" $g "*) EXTRA=rocm; AMD=$g; break ;; esac
+    done
+    if [ "$EXTRA" = rocm ]; then
+      echo "AMD GPU found ($AMD): using the ROCm build."
+    elif [ -n "$AMD" ]; then
+      echo "AMD GPU found ($AMD), but the ROCm PyTorch build doesn't support it: using the CPU build."
+      echo "  (To try anyway: --rocm, with HSA_OVERRIDE_GFX_VERSION set to a close supported target.)"
+    else
+      echo "No NVIDIA or supported AMD GPU found: using the CPU build (AI steps will be slow)."
+    fi
   fi
+fi
+if [ "$EXTRA" = rocm ] && [ -e /dev/kfd ] && ! { [ -r /dev/kfd ] && [ -w /dev/kfd ]; }; then
+  echo "Note: you can't use /dev/kfd yet; ROCm needs it (the 'render' group):" >&2
+  echo "  sudo usermod -aG render,video \"\$USER\"   (then log out and back in)" >&2
 fi
 if [ "$MODE" = auto ]; then
   if command -v distrobox >/dev/null; then MODE=box; else MODE=native; fi

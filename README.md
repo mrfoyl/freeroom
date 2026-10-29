@@ -52,6 +52,7 @@ each platform:
 | Bazzite | Fedora distrobox | CUDA (NVIDIA) | ✅ The app was tested with an RTX 4080, driver 615; ⚠️ the current installer's distrobox route hasn't run yet |
 | Other Linux with distrobox | Fedora distrobox | CUDA or CPU | ⚠️ Untested; same route as Bazzite |
 | Linux with an NVIDIA GPU, native | native | CUDA | ⚠️ Untested |
+| Linux with a supported AMD GPU | native or distrobox | ROCm 6.4 | ⚠️ Untested on a supported card (see AMD below) |
 | macOS 14+, Apple Silicon | native + `Freeroom.app` | Metal (Apple GPU) | ⚠️ Untested on a real Mac (installer and app bundle checked in a simulated run) |
 | macOS on Intel | — | — | ❌ Not supported (PyTorch 2.8 has no Intel Mac build); the installer stops with a message |
 | Linux on ARM, Windows | — | — | ❌ Not supported |
@@ -74,14 +75,29 @@ packages, but it says which libraries are missing.
 - Optional: **distrobox** with podman or docker. If it's installed, Freeroom
   goes in its own Fedora box and the host distro matters little; otherwise it
   installs natively (uv brings its own Python 3.12).
-- For fast AI steps: **NVIDIA GPU with the proprietary driver ≥ 570** (CUDA
-  12.8 PyTorch build) and **≥ 4 GB VRAM** (each AI step uses ~1.3–3 GB)
+- For fast AI steps: an **NVIDIA GPU with the proprietary driver ≥ 570** (CUDA
+  12.8 PyTorch build) or a **ROCm-supported AMD GPU** (Linux), and **≥ 4 GB
+  VRAM** (each AI step uses ~1.3–3 GB)
 
 The installer picks the PyTorch build: CUDA 12.8 when `nvidia-smi` finds a GPU,
-otherwise the CPU build (~1.7 GB environment instead of ~7 GB). On the CPU the
-Raw and B&W tabs (HDR included) are still instant, but the AI steps take minutes to hours
-per photo instead of seconds. AMD GPUs would need the ROCm PyTorch build
-instead (untested).
+ROCm 6.4 when it finds a supported AMD GPU, otherwise the CPU build (~1.7 GB
+environment instead of ~7 GB). On the CPU the Raw and B&W tabs (HDR included)
+are still instant, but the AI steps take minutes to hours per photo instead of
+seconds.
+
+**AMD (ROCm):** the installer reads each AMD GPU's target from sysfs (no ROCm
+tools needed) and picks the ROCm build only for targets PyTorch's ROCm build
+really runs on (its own kernels *and* rocBLAS's): gfx908, gfx90a, gfx942
+(Instinct), gfx1030 (RX 6800/6900), gfx1100–1102 (RX 7000), gfx1200/1201
+(RX 9000). Older Vega (gfx900/906) has PyTorch kernels but no rocBLAS, so it
+can't work. Other AMD GPUs, including
+integrated Radeon graphics, get the CPU build with a note; `--rocm` forces the
+ROCm build, usually together with `HSA_OVERRIDE_GFX_VERSION` set to a close
+supported target (hit and miss). You need to be in the `render` (and `video`)
+group; the installer says so if you can't open `/dev/kfd`. With several AMD
+GPUs Freeroom uses the first one the build supports, and with none it uses the
+CPU instead of failing. Models run in float16 on AMD. The ROCm environment is
+about **14 GB**. Linux only.
 
 On a Mac the installer always installs natively with the `cpu` extra, which
 there is the standard macOS PyTorch: the AI steps run on the Apple GPU through

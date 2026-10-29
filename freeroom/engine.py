@@ -1,5 +1,6 @@
 """AI denoising + AI sharpening on the GPU (tiled), and the cheap slider
-adjustments on top. GPU = NVIDIA (CUDA) or Apple Silicon (Metal), else CPU.
+adjustments on top. GPU = NVIDIA (CUDA), AMD (ROCm; PyTorch shows it as
+"cuda" too) or Apple Silicon (Metal), else CPU.
 
 Each model runs once per photo: denoise first, then the optional deblur model
 on the denoised result (deblurring a noisy image just amplifies the noise).
@@ -9,6 +10,7 @@ The sliders only blend the model outputs, so moving them is instant.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Callable
 
@@ -50,18 +52,43 @@ def pretty_name(path: Path) -> str:
 
 def _device() -> torch.device:
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        i = _gpu_index()
+        if i is not None:
+            return torch.device("cuda", i)
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
 
 
+def _rocm_targets() -> set[str]:
+    """AMD GPU targets this ROCm PyTorch build really runs on: PyTorch's own
+    kernels and rocBLAS's (matrix maths) are shipped for different lists."""
+    rocblas = Path(torch.__file__).parent / "lib" / "rocblas" / "library"
+    blas = {m.group(0) for f in rocblas.glob("*gfx*") if (m := re.search(r"gfx[0-9a-f]+", f.name))}
+    return set(torch.cuda.get_arch_list()) & blas if blas else set(torch.cuda.get_arch_list())
+
+
+def _gpu_index() -> int | None:
+    """NVIDIA: the first GPU. AMD: the first GPU the build supports (skips e.g.
+    an integrated Radeon next to a supported card); None if there's none, so
+    we use the CPU instead of failing. HSA_OVERRIDE_GFX_VERSION = user's choice."""
+    if not torch.version.hip or os.environ.get("HSA_OVERRIDE_GFX_VERSION"):
+        return 0
+    ok = _rocm_targets()
+    for i in range(torch.cuda.device_count()):
+        if torch.cuda.get_device_properties(i).gcnArchName.split(":")[0] in ok:
+            return i
+    return None
+
+
 def device_name() -> str:
     dev = _device()
     if dev.type == "cuda":
-        return torch.cuda.get_device_name(0)
+        return torch.cuda.get_device_name(dev)
     if dev.type == "mps":
         return "Apple GPU (Metal)"
+    if torch.version.hip and torch.cuda.is_available():
+        return "CPU (AMD GPU not supported by this ROCm build, will be slow)"
     return "CPU (no GPU found, will be slow)"
 
 
@@ -81,7 +108,9 @@ class Restorer:
             )
         self.desc = desc.to(self.device).eval()
         self.dtype = torch.float32  # also on Metal: half precision there is less proven
-        if self.device.type == "cuda" and desc.supports_bfloat16:
+        if self.device.type == "cuda" and torch.version.hip and desc.supports_half:
+            self.dtype = torch.float16  # AMD: bfloat16 is slow on many Radeon cards
+        elif self.device.type == "cuda" and desc.supports_bfloat16:
             self.dtype = torch.bfloat16
         elif self.device.type == "cuda" and desc.supports_half:
             self.dtype = torch.float16

@@ -17,26 +17,31 @@ dependencies = [
 
 # PyTorch build, pick exactly one (setup/install.sh does this by itself):
 #   uv sync --extra cu128   NVIDIA GPU (CUDA 12.8)
-#   uv sync --extra cpu     anything else (much smaller download)
+#   uv sync --extra rocm    AMD GPU (ROCm 6.4, Linux only)
+#   uv sync --extra cpu     anything else (much smaller download); on a Mac: Metal
 [project.optional-dependencies]
 cpu = ["torch==2.8.*", "torchvision==0.23.*"]
 cu128 = ["torch==2.8.*", "torchvision==0.23.*"]
+rocm = ["torch==2.8.*", "torchvision==0.23.*", "pytorch-triton-rocm"]
 
 [project.scripts]
 freeroom = "freeroom.app:main"
 
 [tool.uv]
-conflicts = [[{ extra = "cpu" }, { extra = "cu128" }]]
+conflicts = [[{ extra = "cpu" }, { extra = "cu128" }, { extra = "rocm" }]]
 
 [tool.uv.sources]
 torch = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-rocm", extra = "rocm" },
 ]
 torchvision = [
     { index = "pytorch-cpu", extra = "cpu" },
     { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-rocm", extra = "rocm" },
 ]
+pytorch-triton-rocm = [{ index = "pytorch-rocm", extra = "rocm" }]
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
@@ -46,6 +51,11 @@ explicit = true
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm6.4"
 explicit = true
 
 [build-system]
