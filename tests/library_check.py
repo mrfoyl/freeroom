@@ -58,3 +58,15 @@ raws = [Path(p).suffix.lower() for p in lib.items]
 print(f"RAW only: {len(raws)} of {total} shown, all RAW: {all(e in __import__('freeroom').imageio.RAW_EXTS for e in raws)}, count label: {lib.count_label.text()}")
 win.close(); win = appmod.MainWindow(); print("remembered after restart:", win.library.raw_only.isChecked(), len(win.library.items))
 win.library.raw_only.setChecked(False); print("off again:", len(win.library.items) == total); win.close()
+
+# shooting info: Raw tab while editing + Library preview
+win = appmod.MainWindow(); win.resize(1500, 950); win.show(); lib = win.library
+lib.show_folder(folder)
+raw = next(p for p in lib.items if Path(p).suffix.lower() in __import__('freeroom').imageio.RAW_EXTS)
+lib.select(Path(raw)); wait(lambda: "ISO" in lib.info.text(), 30)
+print("library preview info:", lib.info.text().replace("<br>", " | ").replace("<b>", "").replace("</b>", ""))
+lib._open_index(lib.grid.currentIndex()); wait(lambda: win.photo is not None and not win.loading, 60)
+print("Raw tab:", win.shot_head.text(), "|", __import__('re').sub("<[^>]+>", " ", win.shot_rows.text()).split())
+print("view rendered right after load:", win.view._view_img is not None)
+t = wait(lambda: win.view._view_img is not None, 20); print(f"view rendered after {t:.2f}s more:", win.view._view_img is not None)
+win.grab().save(str(out / "raw_tab_info.png")); win.close()

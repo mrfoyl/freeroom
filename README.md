@@ -5,7 +5,10 @@ Simple RAW development + local AI noise reduction / sharpening on the GPU
 distrobox.
 
 Three tabs, applied in this order:
-1. **Raw**: exposure, shadows, midtones, highlights, contrast, temperature,
+1. **Raw**: a **Photo** box at the top with the shot's ISO, shutter speed,
+   aperture and focal length (big), plus exposure compensation, mode, flash,
+   camera, lens, date and size; the Library preview shows the same line. Then
+   exposure, shadows, midtones, highlights, contrast, temperature,
    tint, saturation. RAW files load scene-linear (rawpy, camera WB) with an
    automatic base exposure; Highlights left rolls RAW data past white back
    into range. Per-pixel only, so it's instant. A JPEG at defaults is unchanged.

@@ -717,6 +717,19 @@ class MainWindow(QMainWindow):
         self.sliders[key] = (s, val)
 
     def _build_develop_tab(self) -> QWidget:
+        # Shooting info of the open photo (filled in by _show_shot)
+        shot = QGroupBox("Photo")
+        shot_lay = QVBoxLayout(shot)
+        self.shot_head = QLabel("No photo open")
+        self.shot_head.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        self.shot_head.setWordWrap(True)
+        self.shot_rows = QLabel()
+        self.shot_rows.setWordWrap(True)
+        self.shot_rows.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.shot_rows.hide()
+        shot_lay.addWidget(self.shot_head)
+        shot_lay.addWidget(self.shot_rows)
+
         light = QGroupBox("Light")
         form = QFormLayout(light)
         for spec in DEV_LIGHT:
@@ -738,12 +751,29 @@ class MainWindow(QMainWindow):
         reset.clicked.connect(lambda: self._reset(RAW_KEYS + HDR_KEYS))
         tab = QWidget()
         lay = QVBoxLayout(tab)
+        lay.addWidget(shot)
         lay.addWidget(light)
         lay.addWidget(colour)
         lay.addWidget(self.hdr_group)
         lay.addWidget(reset)
         lay.addStretch(1)
-        return tab
+        scroll = QScrollArea()  # so the dials stay reachable on small screens
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(tab)
+        return scroll
+
+    def _show_shot(self, photo: imageio.Photo):
+        head, rows = imageio.describe_shot(photo.meta.get("shot", {}))
+        h, w, _ = photo.linear.shape
+        rows.append(("Size", f"{w}×{h} ({w * h / 1e6:.1f} MP)"))
+        self.shot_head.setText(head or "No exposure data in this file")
+        self.shot_rows.setText(
+            "<table cellspacing='0' cellpadding='1'>"
+            + "".join(f"<tr><td style='color:#888; padding-right:8px'>{k}</td><td>{v}</td></tr>" for k, v in rows)
+            + "</table>"
+        )
+        self.shot_rows.show()
 
     def _dev_group(self, title: str, flag: str) -> QGroupBox:
         """Checkable section that switches a development step (dev_params[flag]) on/off."""
@@ -1065,6 +1095,7 @@ class MainWindow(QMainWindow):
         self.photo_gen += 1
         self.g = g
         self.library.show_folder(path.parent, select=path)
+        self._show_shot(photo)
         self.enc_orig = None
         self.results.clear()
         self.running.clear()

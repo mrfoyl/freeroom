@@ -192,6 +192,7 @@ class _PreviewJob(QRunnable):
             return
         try:
             im, info = read_preview(self.path, PREVIEW_SIZE)
+            info["shot"] = imageio.shot_info(self.path)
             self.sig.preview.emit(self.req, str(self.path), to_qimage(im), info, "")
         except Exception as e:
             self.sig.preview.emit(self.req, str(self.path), QImage(), {}, f"{type(e).__name__}: {e}")
@@ -494,9 +495,13 @@ class LibraryView(QWidget):
         if "pixels" in info:
             w, h = info["pixels"]
             lines[1] += f" · {w}×{h} ({w * h / 1e6:.1f} MP)"
-        if info.get("camera"):
-            lines.append(str(info["camera"]))
-        lines.append(f"Taken {info['taken']}" if info.get("taken") else
+        shot = info.get("shot", {})
+        head, _ = imageio.describe_shot(shot)
+        if head:
+            lines.append(head)
+        if camera := shot.get("camera") or info.get("camera"):
+            lines.append(f"{camera} · {shot['lens']}" if shot.get("lens") else str(camera))
+        lines.append(shot["taken"].strftime("Taken %Y-%m-%d %H:%M") if shot.get("taken") else
                      time.strftime("Modified %Y-%m-%d %H:%M", time.localtime(st.st_mtime)))
         return "<br>".join(lines)
 

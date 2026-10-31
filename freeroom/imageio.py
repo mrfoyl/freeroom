@@ -6,6 +6,7 @@ the file the photo was loaded from.
 
 from __future__ import annotations
 
+import datetime
 import io
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,9 +37,111 @@ class Photo:
 def load(path: str | Path) -> Photo:
     path = Path(path)
     ext = path.suffix.lower()
-    if ext in RAW_EXTS:
-        return _load_raw(path)
-    return _load_raster(path)
+    photo = _load_raw(path) if ext in RAW_EXTS else _load_raster(path)
+    photo.meta["shot"] = shot_info(path)
+    return photo
+
+
+# --- shooting metadata -------------------------------------------------------
+EXPOSURE_PROGRAMS = {1: "Manual", 2: "Program", 3: "Aperture priority", 4: "Shutter priority",
+                     5: "Creative", 6: "Action", 7: "Portrait", 8: "Landscape"}
+
+
+def _num(v) -> float | None:
+    """EXIF number (int, float, IFDRational, (num, den) or a 1-tuple) -> float."""
+    try:
+        if isinstance(v, (tuple, list)):
+            v = v[0] / v[1] if len(v) == 2 else v[0]
+        f = float(v)
+        return f if f == f else None  # NaN (0/0 rationals)
+    except (TypeError, ValueError, ZeroDivisionError, IndexError):
+        return None
+
+
+def _text(v) -> str:
+    if isinstance(v, bytes):
+        v = v.decode("utf-8", "ignore")
+    return str(v or "").strip("\x00 ").strip()
+
+
+def shot_info(path: str | Path) -> dict:
+    """Camera, lens and exposure of a photo, from EXIF (Pillow; also reads
+    TIFF-based RAWs such as CR2, NEF, ARW, DNG) and, for RAWs, LibRaw.
+    Missing fields are left out. Only reads the file."""
+    path = Path(path)
+    info: dict = {}
+    try:
+        with Image.open(path) as im:
+            ex = im.getexif()
+            sub = ex.get_ifd(0x8769)
+            make, model = _text(ex.get(271)), _text(ex.get(272))
+            info["camera"] = model if model.lower().startswith(make.lower()) else f"{make} {model}".strip()
+            lens_make, lens = _text(sub.get(42035)), _text(sub.get(42036))
+            info["lens"] = lens if not lens_make or lens.lower().startswith(lens_make.lower()) else f"{lens_make} {lens}"
+            iso = sub.get(34855)
+            info["iso"] = _num(iso[0] if isinstance(iso, (tuple, list)) else iso)
+            info["shutter"] = _num(sub.get(33434))
+            info["aperture"] = _num(sub.get(33437))
+            info["focal"] = _num(sub.get(37386))
+            info["focal35"] = _num(sub.get(41989))
+            info["bias"] = _num(sub.get(37380))
+            if (flash := sub.get(37385)) is not None:
+                info["flash"] = bool(int(flash) & 1)
+            info["program"] = EXPOSURE_PROGRAMS.get(sub.get(34850))
+            if taken := _text(sub.get(36867) or ex.get(306)):
+                try:
+                    info["taken"] = datetime.datetime.strptime(taken[:19], "%Y:%m:%d %H:%M:%S")
+                except ValueError:
+                    pass
+    except Exception:
+        pass  # not readable by Pillow (CR3, RAF, …): LibRaw below
+    if path.suffix.lower() in RAW_EXTS:
+        try:
+            import rawpy
+
+            with rawpy.imread(str(path)) as raw:
+                o, lens = raw.other, raw.lens
+            for key, val in (("iso", o.iso_speed), ("shutter", o.shutter_speed),
+                             ("aperture", o.aperture), ("focal", o.focal_length)):
+                if not info.get(key) and val and val > 0:
+                    info[key] = float(val)
+            if not info.get("lens") and lens.model:
+                info["lens"] = _text(lens.model)
+            if not info.get("taken") and o.timestamp and o.timestamp.year > 1971:
+                info["taken"] = o.timestamp
+        except Exception:
+            pass
+    # drop unknowns; 0 means "not recorded" for these (but not for bias or flash)
+    unset = {"iso", "shutter", "aperture", "focal", "focal35"}
+    return {k: v for k, v in info.items() if v is not None and v != "" and not (k in unset and not v)}
+
+
+def describe_shot(info: dict) -> tuple[str, list[tuple[str, str]]]:
+    """("ISO 100 · 1/125 s · f/7.1 · 55 mm", [(label, value), …]) for display."""
+    head = []
+    if iso := info.get("iso"):
+        head.append(f"ISO {iso:g}")
+    if t := info.get("shutter"):
+        head.append(f"{round(t, 1):g} s" if t >= 0.3 else f"1/{round(1 / t)} s")
+    if a := info.get("aperture"):
+        head.append(f"f/{round(a, 1):g}")
+    if f := info.get("focal"):
+        f35 = info.get("focal35")
+        head.append(f"{f:g} mm" + (f" ({f35:g} mm FF)" if f35 and abs(f35 - f) > 1 else ""))
+    rows = []
+    if (b := info.get("bias")) is not None:
+        rows.append(("Exp. comp.", f"{b:+.1f} EV" if abs(b) >= 0.05 else "0 EV"))
+    if p := info.get("program"):
+        rows.append(("Mode", p))
+    if "flash" in info:
+        rows.append(("Flash", "Fired" if info["flash"] else "No"))
+    if c := info.get("camera"):
+        rows.append(("Camera", c))
+    if lens := info.get("lens"):
+        rows.append(("Lens", lens))
+    if d := info.get("taken"):
+        rows.append(("Taken", d.strftime("%Y-%m-%d %H:%M:%S")))
+    return " · ".join(head), rows
 
 
 def _load_raw(path: Path) -> Photo:
