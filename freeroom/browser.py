@@ -34,7 +34,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QComboBox,
+    QCheckBox,
     QFileIconProvider,
     QFileSystemModel,
     QHBoxLayout,
@@ -262,8 +262,6 @@ class LibraryView(QWidget):
 
     open_photo = Signal(object)  # Path
 
-    FILTERS = [("All photos", None), ("RAW only", imageio.RAW_EXTS), ("JPEG/TIFF/PNG only", imageio.RASTER_EXTS)]
-
     def __init__(self):
         super().__init__()
         self.settings = QSettings("freeroom", "freeroom")
@@ -311,10 +309,10 @@ class LibraryView(QWidget):
         self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.count_label = QLabel()
         self.count_label.setStyleSheet("color: #999;")
-        self.filter_box = QComboBox()
-        for name, _ in self.FILTERS:
-            self.filter_box.addItem(name)
-        self.filter_box.currentIndexChanged.connect(lambda _: self.refresh())
+        self.raw_only = QCheckBox("RAW only")
+        self.raw_only.setToolTip("Show only RAW files (" + ", ".join(sorted(e.lstrip(".").upper() for e in imageio.RAW_EXTS)) + ")")
+        self.raw_only.setChecked(self.settings.value("library/raw_only", False, type=bool))
+        self.raw_only.toggled.connect(self._raw_only_toggled)
         self.size_slider = QSlider(Qt.Orientation.Horizontal)
         self.size_slider.setRange(100, 320)
         self.size_slider.setValue(int(self.settings.value("library/thumb", 170)))
@@ -343,7 +341,7 @@ class LibraryView(QWidget):
         bar = QHBoxLayout()
         bar.addWidget(self.path_label, 1)
         bar.addWidget(self.count_label)
-        bar.addWidget(self.filter_box)
+        bar.addWidget(self.raw_only)
         bar.addWidget(QLabel("Size"))
         bar.addWidget(self.size_slider)
         middle = QWidget()
@@ -408,7 +406,7 @@ class LibraryView(QWidget):
         self.items.clear()
         folder = self.folder
         self.path_label.setText(f"<b>{folder.name or folder}</b> <span style='color:#999'>{folder}</span>")
-        exts = self.FILTERS[self.filter_box.currentIndex()][1] or imageio.ALL_EXTS
+        exts = imageio.RAW_EXTS if self.raw_only.isChecked() else imageio.ALL_EXTS
         try:
             files = sorted(
                 (Path(e.path) for e in os.scandir(folder) if e.is_file() and Path(e.name).suffix.lower() in exts),
@@ -439,6 +437,12 @@ class LibraryView(QWidget):
             self.preview.set_image(QImage(), "No photos in this folder")
             self.info.setText("")
             self.open_btn.setEnabled(False)
+
+    def _raw_only_toggled(self, on: bool):
+        self.settings.setValue("library/raw_only", on)
+        cur = self.grid.currentIndex()
+        self._select_after_scan = Path(cur.data(PATH_ROLE)) if cur.isValid() else None  # keep it if still shown
+        self.refresh()
 
     def select(self, path: Path):
         it = self.items.get(str(path))

@@ -48,3 +48,13 @@ print("back in Library, same photo selected:", Path(lib.grid.currentIndex().data
 after = {e.name: (e.stat().st_mtime_ns, e.stat().st_size) for e in os.scandir(folder)}
 print("source folder untouched:", before == after)
 win.close()
+
+# RAW only checkbox (remembered)
+qapp2 = qapp
+win = appmod.MainWindow(); win.show(); lib = win.library
+lib.show_folder(folder); total = len(lib.items)
+lib.raw_only.setChecked(True); wait(lambda: True, 1)
+raws = [Path(p).suffix.lower() for p in lib.items]
+print(f"RAW only: {len(raws)} of {total} shown, all RAW: {all(e in __import__('freeroom').imageio.RAW_EXTS for e in raws)}, count label: {lib.count_label.text()}")
+win.close(); win = appmod.MainWindow(); print("remembered after restart:", win.library.raw_only.isChecked(), len(win.library.items))
+win.library.raw_only.setChecked(False); print("off again:", len(win.library.items) == total); win.close()

@@ -23,7 +23,7 @@ Three tabs, applied in this order:
 
 **Library** (top bar, `G`; **Edit** = `E`): Freeroom starts here. Places
 (Pictures, Home, mounted drives: `/run/media`, `/media` or the Mac's `/Volumes`) and a folder tree on the left, thumbnails of
-the folder's photos in the middle (RAW, JPEG, TIFF, PNG…; filter and size
+the folder's photos in the middle (RAW, JPEG, TIFF, PNG…; a **RAW only** checkbox and a size
 slider on top), a large preview with file info on the right. Double-click,
 Enter or **Open in editor** opens a photo; opening one any other way (Open…,
 drag & drop) also switches to Edit, and the Library follows to that photo's
