@@ -3,7 +3,8 @@
 
 Photo folders are only ever read. RAW thumbnails/previews come from the JPEG
 the camera embedded in the file (fast, no demosaicing); thumbnails are cached
-in ~/.cache/freeroom/thumbs.
+in the system cache folder (~/.cache/freeroom/thumbs on Linux,
+~/Library/Caches/freeroom/thumbs on macOS).
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -19,11 +21,13 @@ import numpy as np
 from PIL import Image, ImageOps
 from PySide6.QtCore import (
     QDir,
+    QFileInfo,
     QModelIndex,
     QObject,
     QRunnable,
     QSettings,
     QSize,
+    QStandardPaths,
     Qt,
     QThreadPool,
     Signal,
@@ -31,6 +35,7 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QColor, QIcon, QImage, QKeySequence, QPainter, QPixmap, QShortcut, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileIconProvider,
     QFileSystemModel,
     QHBoxLayout,
     QLabel,
@@ -49,7 +54,8 @@ from . import develop, imageio
 
 THUMB_SIZE = 320  # pixels stored per thumbnail (the grid scales them down)
 PREVIEW_SIZE = 1600
-CACHE_DIR = Path.home() / ".cache" / "freeroom" / "thumbs"
+# ~/.cache on Linux, ~/Library/Caches on macOS
+CACHE_DIR = Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.GenericCacheLocation)) / "freeroom" / "thumbs"
 PATH_ROLE = Qt.ItemDataRole.UserRole + 1
 
 # LibRaw "flip" -> rotation of the embedded preview (it's stored unrotated)
@@ -234,13 +240,20 @@ def _placeholder(size: int, text: str = "") -> QIcon:
     return QIcon(pm)
 
 
-def _places() -> list[tuple[str, Path, str]]:
-    """(name, folder, theme icon): Pictures, Home and mounted drives."""
+def _places() -> list[tuple[str, Path]]:
+    """Pictures, Home and mounted drives (Linux: /run/media/$USER, /media/$USER; macOS: /Volumes)."""
     home = Path.home()
-    out = [("Pictures", home / "Pictures", "folder-pictures"), ("Home", home, "user-home")]
-    media = Path("/run/media") / home.name
-    if media.is_dir():
-        out += [(d.name, d, "drive-harddisk") for d in sorted(media.iterdir()) if d.is_dir()]
+    out = [("Pictures", home / "Pictures"), ("Home", home)]
+    if sys.platform == "darwin":
+        roots = [Path("/Volumes")]
+    else:
+        roots = [Path("/run/media") / home.name, Path("/media") / home.name]
+    for root in roots:
+        if root.is_dir():
+            for d in sorted(root.iterdir()):
+                # skip the Mac's own startup disk (/Volumes/Macintosh HD -> /)
+                if d.is_dir() and not (d.is_symlink() and d.resolve() == Path("/")):
+                    out.append((d.name, d))
     return [p for p in out if p[1].is_dir()]
 
 
@@ -268,8 +281,9 @@ class LibraryView(QWidget):
         # --- left: places + folder tree
         self.places = QListWidget()
         self.places.setMaximumHeight(130)
-        for name, path, icon in _places():
-            it = QListWidgetItem(QIcon.fromTheme(icon, QIcon.fromTheme("folder")), name)
+        icons = QFileIconProvider()  # the platform's own folder / drive icons
+        for name, path in _places():
+            it = QListWidgetItem(icons.icon(QFileInfo(str(path))), name)
             it.setData(PATH_ROLE, str(path))
             it.setToolTip(str(path))
             self.places.addItem(it)
