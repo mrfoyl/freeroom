@@ -748,7 +748,7 @@ class MainWindow(QMainWindow):
         for spec in DEV_HDR:
             self._add_slider(form, spec, self.dev_changed)
         reset = QPushButton("Reset development")
-        reset.clicked.connect(lambda: self._reset(RAW_KEYS + HDR_KEYS))
+        reset.clicked.connect(self.reset_development)
         tab = QWidget()
         lay = QVBoxLayout(tab)
         lay.addWidget(shot)
@@ -865,6 +865,10 @@ class MainWindow(QMainWindow):
         for key in keys:
             self.sliders[key][0].setValue(SLIDER_DEFAULTS[key])
 
+    def reset_development(self):
+        self._reset(RAW_KEYS + HDR_KEYS)
+        self.hdr_group.setChecked(bool(develop.DEFAULTS["hdr"]))
+
     def dev_changed(self, key: str, value: float):
         self.dev_params[key] = value
         self.view.set_dev_params(self.dev_params)
@@ -976,7 +980,39 @@ class MainWindow(QMainWindow):
             },
         }
 
-    def apply_settings(self, s: dict):
+    def default_settings(self) -> dict:
+        """Every setting at its default, in the same form as settings()."""
+        def first(box: QComboBox):
+            p = box.itemData(0) if box.count() else None
+            return p.stem if p is not None else None
+
+        d = SLIDER_DEFAULTS
+        return {
+            "development": dict(develop.DEFAULTS),
+            "enhancement": {
+                "noise_reduction": {"enabled": True, "model": first(self.denoise_box),
+                                    "luminance": d["luminance"] / 100, "color": d["color"] / 100},
+                "sharpening": {"enabled": False, "model": first(self.sharpen_box),
+                               "ai_sharpen": d["ai_sharpen"] / 100, "sharpen": d["sharpen"] / 100},
+            },
+        }
+
+    @staticmethod
+    def _same_settings(a: dict, b: dict) -> bool:
+        """Equal, ignoring float noise from slider steps."""
+        def norm(x):
+            if isinstance(x, dict):
+                return {k: norm(v) for k, v in x.items() if k != "version"}
+            if isinstance(x, float):
+                return round(x, 4)
+            return x
+        return norm(a) == norm(b)
+
+    def reset_all_settings(self, run_pipeline: bool = True):
+        self.apply_settings(self.default_settings(), run_pipeline=run_pipeline)
+        self.preset_box.setCurrentIndex(0)
+
+    def apply_settings(self, s: dict, run_pipeline: bool = True):
         def set_slider(key, value):
             if value is not None:
                 self.sliders[key][0].setValue(round(float(value) * 100))
@@ -1010,7 +1046,8 @@ class MainWindow(QMainWindow):
         finally:
             self._applying = False
         self._sync_enh_view()
-        self.update_pipeline()
+        if run_pipeline:
+            self.update_pipeline()
 
     def refresh_presets(self, select: str | None = None):
         self.preset_box.clear()
@@ -1035,13 +1072,14 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, "Save preset", "Preset name:", text=current)
         name = name.strip()
         if not ok or not name:
-            return
+            return False
         if name in presets.names() and name != current:
             if QMessageBox.question(self, "Save preset", f"Overwrite preset “{name}”?") != QMessageBox.StandardButton.Yes:
-                return
+                return False
         presets.save(name, self.settings())
         self.refresh_presets(select=name)
         self.status.setText(f"Preset “{name}” saved")
+        return True
 
     def delete_preset(self):
         name = self.preset_box.currentData()
@@ -1064,8 +1102,40 @@ class MainWindow(QMainWindow):
     def loading(self) -> bool:
         return self.load_text is not None
 
+    def _settings_unsaved(self) -> bool:
+        """Settings differ from the defaults and from the selected preset."""
+        current = self.settings()
+        if self._same_settings(current, self.default_settings()):
+            return False
+        name = self.preset_box.currentData()
+        try:
+            return not (name and self._same_settings(current, presets.load(name)))
+        except Exception:
+            return True
+
+    def _leave_photo(self) -> bool:
+        """Before another photo replaces the open one: offer to keep the settings
+        as a preset, then reset everything. False = stay on this photo."""
+        if self._settings_unsaved():
+            answer = QMessageBox.question(
+                self,
+                "Save preset?",
+                f"Save the settings used on {self.photo.path.name} as a preset before opening "
+                "the next photo?\n\nAll settings are reset to their defaults for the new photo.",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if answer == QMessageBox.StandardButton.Cancel:
+                return False
+            if answer == QMessageBox.StandardButton.Save and not self.save_preset():
+                return False  # name dialog cancelled: keep everything as it was
+        self.reset_all_settings(run_pipeline=False)  # the new photo starts the AI if needed
+        return True
+
     def open_path(self, path: Path):
         """Start loading a photo (in the editor); on_loaded takes over when it's decoded."""
+        if self.photo is not None and Path(path) != self.photo.path and not self._leave_photo():
+            return
         self.set_mode(edit=True)
         self.load_req += 1
         self.load_text = f"Loading {path.name}…"

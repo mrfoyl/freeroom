@@ -64,6 +64,12 @@ it then waits until you change a model or reopen the Enhancement tab.
 The RGB range view (histogram) above the tabs shows the current result, with
 clip markers and a note when a RAW has highlight data past white.
 
+**Opening another photo** (drop, Open…, Library) starts it from the default
+settings. If the current settings aren't the defaults or the selected preset,
+Freeroom first asks whether to save them as a preset (Save / Discard /
+Cancel; Cancel keeps the current photo). **Reset development** also switches
+HDR tone mapping off.
+
 Presets (all settings of both tabs) are JSON files in
 `~/.config/freeroom/presets/`. Saving works from either tab; it runs any
 missing enhancement first.
