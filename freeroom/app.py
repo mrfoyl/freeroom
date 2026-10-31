@@ -6,6 +6,8 @@ B&W tab: more development, applied after the Raw tab.
 Enhancement tab: AI denoise + sharpen, shown on top of the development.
 Crop (top bar): applied to the view and the saved file; kept per photo, not in presets.
 Batch… (top bar): one preset over a whole folder (see batch.py).
+Library (G) / Edit (E): browse folders with thumbnails and a preview (browser.py),
+open a photo in the editor.
 Each AI model runs at most once per photo; its result is kept and the dials
 are applied on top (see pipeline.py), so only a new photo re-runs the AI.
 """
@@ -20,9 +22,10 @@ from typing import Callable
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QAction, QIcon, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -40,12 +43,14 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QStackedWidget,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from . import batch, develop, engine, imageio, pipeline, presets
+from .browser import LibraryView
 from .widgets import Histogram, PhotoView, ResetSlider
 
 SAVE_DIR = Path.home() / "Pictures" / "freeroom"
@@ -481,10 +486,8 @@ class MainWindow(QMainWindow):
 
         # --- top bar
         open_btn = QPushButton("Open…")
-        open_btn.setShortcut("Ctrl+O")
         open_btn.clicked.connect(self.open_dialog)
         self.save_btn = QPushButton("Save…")
-        self.save_btn.setShortcut("Ctrl+S")
         self.save_btn.setEnabled(False)
         self.save_btn.clicked.connect(self.save_dialog)
 
@@ -535,9 +538,26 @@ class MainWindow(QMainWindow):
         self.load_text: str | None = None  # overlay text while a photo is loading
         self.status = QLabel(engine.device_name())
 
+        # Library / Edit switch
+        self.library_btn = QPushButton("Library")
+        self.edit_btn = QPushButton("Edit")
+        modes = QButtonGroup(self)
+        for b, tip in ((self.library_btn, "Browse folders and photos (G)"), (self.edit_btn, "Develop and enhance (E)")):
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            modes.addButton(b)
+        self.library_btn.clicked.connect(lambda: self.set_mode(edit=False))
+        self.edit_btn.clicked.connect(lambda: self.set_mode(edit=True))
+
+        preset_label = QLabel("   Preset:")
+        crop_gap = QLabel("   ")
+        # shown only in Edit mode (hidden widgets' shortcuts, like C for crop, don't fire)
+        self.edit_only = [self.save_btn, preset_label, self.preset_box, save_preset, del_preset,
+                          crop_gap, self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset]
         top = QHBoxLayout()
-        for w in (open_btn, self.save_btn, QLabel("   Preset:"), self.preset_box, save_preset, del_preset,
-                  batch_btn, QLabel("   "), self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset):
+        for w in (self.library_btn, self.edit_btn, QLabel("  "), open_btn, self.save_btn, preset_label,
+                  self.preset_box, save_preset, del_preset, batch_btn, crop_gap, self.crop_btn,
+                  self.aspect_box, self.aspect_flip, self.crop_reset):
             top.addWidget(w)
         top.addStretch(1)
         top.addWidget(self.status)
@@ -572,14 +592,25 @@ class MainWindow(QMainWindow):
         side_w.setStyleSheet(GROUP_STYLE)
 
         body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
         body.addWidget(self.view, 1)
         body.addWidget(side_w)
+        editor = QWidget()
+        editor.setLayout(body)
+
+        self.library = LibraryView()
+        self.library.open_photo.connect(self.open_from_library)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.library)
+        self.pages.addWidget(editor)
+
         root = QVBoxLayout()
         root.addLayout(top)
-        root.addLayout(body, 1)
+        root.addWidget(self.pages, 1)
         central = QWidget()
         central.setLayout(root)
         self.setCentralWidget(central)
+        self._build_menu(batch_btn)
 
         # --- worker thread
         self.thread = QThread(self)
@@ -614,8 +645,56 @@ class MainWindow(QMainWindow):
         self.refresh.timeout.connect(self.view.ai_updated)
 
         self._sync_enh_view()
+        self.set_mode(edit=False)  # start in the Library
         if self.denoise_box.count() == 0:
             self.status.setText("No models in models/ — run setup/download-models.sh")
+
+    # --- menu and Library / Edit ----------------------------------------
+    def _build_menu(self, batch_btn: QPushButton):
+        def action(menu, text, slot, shortcut=None):
+            a = QAction(text, self)
+            if shortcut:
+                a.setShortcut(QKeySequence(shortcut))
+            a.triggered.connect(slot)
+            menu.addAction(a)
+            return a
+
+        file_menu = self.menuBar().addMenu("&File")
+        action(file_menu, "&Open photo…", self.open_dialog, "Ctrl+O")
+        action(file_menu, "Open &folder in Library…", self.open_folder_dialog, "Ctrl+Shift+O")
+        self.save_action = action(file_menu, "&Save…", lambda: self.save_btn.isEnabled() and self.save_dialog(), "Ctrl+S")
+        file_menu.addSeparator()
+        action(file_menu, "&Batch…", batch_btn.click)
+        file_menu.addSeparator()
+        action(file_menu, "&Quit", self.close, "Ctrl+Q")
+        view_menu = self.menuBar().addMenu("&View")
+        action(view_menu, "&Library", lambda: self.set_mode(edit=False), "G")
+        action(view_menu, "&Edit", lambda: self.set_mode(edit=True), "E")
+
+    def set_mode(self, edit: bool):
+        self.pages.setCurrentIndex(1 if edit else 0)
+        (self.edit_btn if edit else self.library_btn).setChecked(True)
+        for w in self.edit_only:
+            w.setVisible(edit)
+        if edit:
+            self.view.setFocus()
+        else:
+            if self.crop_btn.isChecked():
+                self.crop_btn.setChecked(False)
+            self.library.grid.setFocus()
+
+    def open_folder_dialog(self):
+        start = str(self.library.folder or Path.home() / "Pictures")
+        folder = QFileDialog.getExistingDirectory(self, "Open folder", start)
+        if folder:
+            self.library.show_folder(Path(folder))
+            self.set_mode(edit=False)
+
+    def open_from_library(self, path: Path):
+        if self.photo is not None and path == self.photo.path:
+            self.set_mode(edit=True)  # already open: keep its edits and AI results
+        else:
+            self.open_path(path)
 
     # --- building the tabs ----------------------------------------------
     def _add_slider(self, form: QFormLayout, spec, on_change: Callable[[str, float], None]):
@@ -956,7 +1035,8 @@ class MainWindow(QMainWindow):
         return self.load_text is not None
 
     def open_path(self, path: Path):
-        """Start loading a photo; on_loaded takes over when it's decoded."""
+        """Start loading a photo (in the editor); on_loaded takes over when it's decoded."""
+        self.set_mode(edit=True)
         self.load_req += 1
         self.load_text = f"Loading {path.name}…"
         if not self.saving:  # else it shows once the save is done (same thread)
@@ -984,6 +1064,7 @@ class MainWindow(QMainWindow):
         self.photo = photo
         self.photo_gen += 1
         self.g = g
+        self.library.show_folder(path.parent, select=path)
         self.enc_orig = None
         self.results.clear()
         self.running.clear()
@@ -1190,6 +1271,7 @@ class MainWindow(QMainWindow):
         self.load_thread.quit()
         self.load_thread.wait(5000)
         self.view.shutdown()
+        self.library.shutdown()
         super().closeEvent(e)
 
 

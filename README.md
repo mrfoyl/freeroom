@@ -21,6 +21,18 @@ Three tabs, applied in this order:
 3. **Enhancement**: the AI steps below, shown on top of the development.
    Each section can be switched off.
 
+**Library** (top bar, `G`; **Edit** = `E`): Freeroom starts here. Places
+(Pictures, Home, mounted drives) and a folder tree on the left, thumbnails of
+the folder's photos in the middle (RAW, JPEG, TIFF, PNG…; filter and size
+slider on top), a large preview with file info on the right. Double-click,
+Enter or **Open in editor** opens a photo; opening one any other way (Open…,
+drag & drop) also switches to Edit, and the Library follows to that photo's
+folder. RAW thumbnails and previews use the JPEG the camera embedded in the
+file, so they're quick (about 80 ms per photo the first time on a USB drive;
+thumbnails are cached in `~/.cache/freeroom/thumbs`). Photo folders are only
+read, never written. The **File** menu has Open photo (Ctrl+O), Open folder in
+Library (Ctrl+Shift+O), Save (Ctrl+S), Batch and Quit.
+
 **Crop** (top bar, or `C`): drag the frame, its handles, or a new frame on the
 whole photo; pick an aspect ratio (Free, Original, 1:1, 3:2, 4:3, 5:4, 16:9;
 ⇄ swaps portrait / landscape). Enter applies, Esc undoes the changes. The view,
