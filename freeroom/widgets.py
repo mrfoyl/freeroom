@@ -387,7 +387,7 @@ class PhotoView(QWidget):
             return pipeline.compose(
                 lin, dn, sharp, self.g, self.dev_params, self.baseline_ev, self.enh_params, self._lut, base, fix=fix
             )
-        return develop.develop(fix(lin), self.dev_params, self.baseline_ev, self._lut, base)
+        return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut, base)
 
     def _render_view(self):
         """Ask for the view to be re-rendered (in the background, newest state wins)."""
@@ -453,7 +453,7 @@ class PhotoView(QWidget):
                 p.drawEllipse(self.mouse, r, r)
 
     def _paint_banner(self, p: QPainter):
-        lines = "Click near a red pupil  ·  Scroll: search size  ·  Right-click: remove a fix  ·  Enter: done"
+        lines = "Click near a red pupil (the other eye is found with it)  ·  Scroll: search size  ·  Right-click: remove a fix  ·  Enter: done"
         if self.redeye_note:
             lines += "\n" + self.redeye_note
         box = p.fontMetrics().boundingRect(self.rect().adjusted(20, 0, -20, 0), Qt.TextFlag.TextWordWrap, lines)

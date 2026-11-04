@@ -182,6 +182,9 @@ class Saver(QObject):
                 done[0] += 1
 
             lin, dn, sharp, base = job["photo"].linear, job["dn"], job["sharp"], None
+            spots = job["spots"]
+            if spots is None:  # saved before the search for red eyes had finished
+                spots = redeye.detect(lin, job["photo"].baseline_ev)
             if job["crop"]:
                 # develop only the cropped part; HDR still uses the whole photo's map
                 x0, y0, x1, y1 = job["crop"]
@@ -194,13 +197,26 @@ class Saver(QObject):
             rgb = pipeline.compose(
                 lin, dn, sharp, job["g"], job["dev"], job["photo"].baseline_ev, job["enh"],
                 base=base, progress=step,
-                fix=lambda x: redeye.apply(x, job["spots"], (y0, x0, y1, x1) if job["crop"] else None),
+                fix=lambda x: redeye.apply(x, spots, (y0, x0, y1, x1) if job["crop"] else None),
             )
             step(f"Writing {job['out'].name}")
             saved = imageio.save(job["photo"], rgb, job["out"])
             self.saved.emit(str(saved))
         except Exception as e:
             self.failed.emit(str(e))
+
+
+class RedEyeFinder(QObject):
+    """Looks through a whole photo for red eyes, off the GUI thread."""
+
+    found = Signal(int, tuple)  # photo generation, spots
+    failed = Signal(int, str)
+
+    def find(self, gen: int, linear: np.ndarray, baseline_ev: float):
+        try:
+            self.found.emit(gen, tuple(redeye.detect(linear, baseline_ev)))
+        except Exception as e:
+            self.failed.emit(gen, str(e))
 
 
 class BatchWorker(QObject):
@@ -457,6 +473,7 @@ class MainWindow(QMainWindow):
     start_job = Signal(object)
     start_load = Signal(int, object)
     start_save = Signal(object)
+    start_find = Signal(int, object, float)
 
     def __init__(self):
         super().__init__()
@@ -528,22 +545,6 @@ class MainWindow(QMainWindow):
         self.view.crop_finished.connect(self.crop_finished)
         self._set_crop_controls()
 
-        self.redeye_btn = QPushButton("Red eye")
-        self.redeye_btn.setCheckable(True)
-        self.redeye_btn.setShortcut("R")
-        self.redeye_btn.setToolTip("Remove red eye (R). Click near a pupil; scroll = search size, right-click = remove a fix")
-        self.redeye_btn.setEnabled(False)
-        self.redeye_btn.toggled.connect(self.redeye_toggled)
-        self.redeye_undo = QPushButton("Undo")
-        self.redeye_undo.setShortcut("Ctrl+Z")
-        self.redeye_undo.setToolTip("Undo the last red eye fix (Ctrl+Z)")
-        self.redeye_undo.clicked.connect(lambda: self.view.set_spots(self.view.spots[:-1]))
-        self.redeye_clear = QPushButton("Clear red eye")
-        self.redeye_clear.clicked.connect(lambda: self.view.set_spots(()))
-        self.view.redeye_clicked.connect(self.on_redeye_click)
-        self.view.spots_changed.connect(self._set_redeye_controls)
-        self.view.redeye_finished.connect(lambda: self.redeye_btn.setChecked(False))
-
         self.progress = QProgressBar()
         self.progress.setMaximumWidth(220)
         self.progress.setTextVisible(True)
@@ -571,13 +572,11 @@ class MainWindow(QMainWindow):
         crop_gap = QLabel("   ")
         # shown only in Edit mode (hidden widgets' shortcuts, like C for crop, don't fire)
         self.edit_only = [self.save_btn, preset_label, self.preset_box, save_preset, del_preset,
-                          crop_gap, self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset,
-                          self.redeye_btn, self.redeye_undo, self.redeye_clear]
+                          crop_gap, self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset]
         top = QHBoxLayout()
         for w in (self.library_btn, self.edit_btn, QLabel("  "), open_btn, self.save_btn, preset_label,
                   self.preset_box, save_preset, del_preset, batch_btn, crop_gap, self.crop_btn,
-                  self.aspect_box, self.aspect_flip, self.crop_reset, self.redeye_btn, self.redeye_undo,
-                  self.redeye_clear):
+                  self.aspect_box, self.aspect_flip, self.crop_reset):
             top.addWidget(w)
         # long texts (a saved path…) get cut off instead of widening the window
         self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -597,7 +596,7 @@ class MainWindow(QMainWindow):
         hint = QLabel(
             "<b>Loupe</b> = 100% (1 photo pixel = 1 screen pixel).<br>"
             "Hold mouse button: before, in loupe · Hold Space: before, everywhere · "
-            "Scroll: loupe size. <b>R</b>: red eye.<br>"
+            "Scroll: loupe size.<br>"
             "<i>Before</i> = as shot on the Raw and B&amp;W tabs, unenhanced on the Enhancement tab."
         )
         hint.setStyleSheet("color: #999;")
@@ -659,6 +658,11 @@ class MainWindow(QMainWindow):
         self.saver.progress.connect(self.on_save_progress)
         self.saver.saved.connect(self.on_saved)
         self.saver.failed.connect(self.on_save_failed)
+        self.finder = RedEyeFinder()  # same thread: it reads the photo, like the others
+        self.finder.moveToThread(self.load_thread)
+        self.start_find.connect(self.finder.find)
+        self.finder.found.connect(self.on_redeye_found)
+        self.finder.failed.connect(self.on_redeye_failed)
         self.saving = False
         self.load_thread.start()
 
@@ -700,7 +704,6 @@ class MainWindow(QMainWindow):
             w.setVisible(edit)
         if edit:  # these show only when they apply
             self._set_crop_controls()
-            self._set_redeye_controls()
         if edit:
             self.view.setFocus()
         else:
@@ -840,6 +843,44 @@ class MainWindow(QMainWindow):
         scroll.setWidget(inner)
         return scroll
 
+    def _build_redeye_group(self) -> QGroupBox:
+        group = QGroupBox("Red eye")
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.setToolTip(
+            "Looks for red pupils in pairs: same size, as far apart as eyes are for a pupil "
+            "that size, on a face the face detector finds. No AI re-run; the dials stay live."
+        )
+        self.redeye_status = QLabel("Finds red eyes by itself.")
+        self.redeye_status.setWordWrap(True)
+        self.redeye_btn = QPushButton("Fix by hand")
+        self.redeye_btn.setCheckable(True)
+        self.redeye_btn.setShortcut("R")
+        self.redeye_btn.setToolTip("Click near a pupil a search missed (R); the other eye is found with it. "
+                                   "Scroll = search size, right-click = remove a fix")
+        self.redeye_btn.toggled.connect(self.redeye_toggled)
+        self.redeye_undo = QPushButton("Undo")
+        self.redeye_undo.setToolTip("Undo the last fix")
+        self.redeye_undo.clicked.connect(lambda: self.view.set_spots(self.view.spots[:-1]))
+        self.redeye_again = QPushButton("Find again")
+        self.redeye_again.setToolTip("Back to what the search found, without changes by hand")
+        self.redeye_again.clicked.connect(self.redeye_find_again)
+        buttons = QHBoxLayout()
+        for b in (self.redeye_btn, self.redeye_undo, self.redeye_again):
+            buttons.addWidget(b)
+        lay = QVBoxLayout(group)
+        lay.addWidget(self.redeye_status)
+        lay.addLayout(buttons)
+        group.toggled.connect(self.redeye_section_toggled)
+        self.view.redeye_clicked.connect(self.on_redeye_click)
+        self.view.spots_changed.connect(self._set_redeye_controls)
+        self.view.redeye_finished.connect(lambda: self.redeye_btn.setChecked(False))
+        self.redeye_found: tuple | None = None  # what the search found on this photo; None = not yet
+        self.redeye_kept: tuple = ()  # the fixes, while the section is off
+        self.redeye_searching = False
+        self._set_redeye_controls()
+        return group
+
     def _build_enhance_tab(self) -> QWidget:
         self.denoise_box = QComboBox()
         for p in engine.list_models("denoise"):
@@ -868,6 +909,8 @@ class MainWindow(QMainWindow):
         for spec in ENH_SH:
             self._add_slider(form, spec, self.enh_changed)
 
+        self.re_group = self._build_redeye_group()
+
         reset = QPushButton("Reset enhancement sliders")
         reset.clicked.connect(lambda: self._reset(ENH_KEYS))
         note = QLabel(
@@ -881,6 +924,7 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(tab)
         lay.addWidget(self.nr_group)
         lay.addWidget(self.sh_group)
+        lay.addWidget(self.re_group)
         lay.addWidget(reset)
         lay.addWidget(note)
         lay.addStretch(1)
@@ -920,6 +964,8 @@ class MainWindow(QMainWindow):
 
     def tab_changed(self, _):
         enhance = self.tabs.currentWidget() is self.enh_tab
+        if not enhance:
+            self.redeye_btn.setChecked(False)  # fixes show on this tab only, like the AI steps
         self.view.set_mode("enhance" if enhance else "develop")
         if enhance:
             self.update_pipeline()
@@ -985,26 +1031,86 @@ class MainWindow(QMainWindow):
     # --- red eye ----------------------------------------------------------
     def _set_redeye_controls(self):
         n = len(self.view.spots)
-        on = self.redeye_btn.isChecked()
-        self.redeye_undo.setVisible(on)
+        ready = self.photo is not None
+        self.redeye_btn.setEnabled(ready)
         self.redeye_undo.setEnabled(n > 0)
-        self.redeye_clear.setVisible(on or n > 0)
-        self.redeye_btn.setText(f"Red eye ({n})" if n else "Red eye")
+        self.redeye_again.setEnabled(ready and self.redeye_found is not None)
+        if self.redeye_searching:
+            text = "Looking for red eyes…"
+        elif not ready or self.redeye_found is None:
+            text = "Finds red eyes by itself."
+        elif n:
+            text = f"{n} red {'eye' if n == 1 else 'eyes'} fixed."
+        else:
+            text = "No red eyes found. To fix one anyway: Fix by hand."
+        self.redeye_status.setText(text)
+
+    def _redeye_search(self):
+        if self.photo is None or self.redeye_searching or self.redeye_found is not None:
+            return
+        self.redeye_searching = True
+        self.start_find.emit(self.photo_gen, self.photo.linear, self.photo.baseline_ev)
+        self._set_redeye_controls()
+
+    def redeye_section_toggled(self, on: bool):
+        if on:
+            self.view.set_spots(self.redeye_kept)
+            self._redeye_search()
+        else:
+            self.redeye_btn.setChecked(False)
+            self.redeye_kept = self.view.spots
+            self.view.set_spots(())
+        self._set_redeye_controls()
+
+    def on_redeye_found(self, gen: int, spots: tuple):
+        if gen != self.photo_gen:
+            self.redeye_searching = False  # a search of the photo before this one
+            if self.re_group.isChecked():
+                self._redeye_search()
+            return
+        self.redeye_searching = False
+        self.redeye_found = spots
+        if self.re_group.isChecked():
+            # fixes by hand made during the search stay, unless it found the same eye
+            mine = [s for s in self.view.spots if not any(np.hypot(s.cx - f.cx, s.cy - f.cy) < f.radius for f in spots)]
+            self.view.set_spots((*spots, *mine))
+        else:
+            self.redeye_kept = spots
+        self._set_redeye_controls()
+
+    def on_redeye_failed(self, gen: int, msg: str):
+        self.redeye_searching = False
+        if gen == self.photo_gen:
+            self.redeye_found = ()
+            self.status.setText(f"Red eye search failed: {msg}")
+        self._set_redeye_controls()
+
+    def redeye_find_again(self):
+        self.view.set_spots(self.redeye_found or ())
 
     def redeye_toggled(self, on: bool):
         if on:
             self.crop_btn.setChecked(False)
         self.view.set_redeye_mode(on)
         self.view.setFocus()  # for Enter / Esc
-        self._set_redeye_controls()
 
     def on_redeye_click(self, x: float, y: float, r: float):
-        spot = redeye.find(self.photo.linear, x, y, r, self.photo.baseline_ev)
+        lin, ev = self.photo.linear, self.photo.baseline_ev
+        spot = redeye.find(lin, x, y, r, ev)
         if spot is None:
             self.view.set_redeye_note("No red pupil found there. Click closer to it, or scroll to change the search size.")
             return
-        self.view.set_spots((*self.view.spots, spot))
-        self.view.set_redeye_note(f"Fixed {len(self.view.spots)}. Click the next eye, or press Enter when done.")
+        other = redeye.partner(lin, spot, ev)
+        new = [s for s in (spot, other) if s is not None
+               and not any(np.hypot(s.cx - o.cx, s.cy - o.cy) < o.radius for o in self.view.spots)]
+        self.view.set_spots((*self.view.spots, *new))
+        if not new:
+            note = "Already fixed."
+        elif other is None:
+            note = "Fixed this eye; no red partner of the same size on either side."
+        else:
+            note = "Fixed both eyes."
+        self.view.set_redeye_note(f"{note} Click the next eye, or press Enter when done.")
 
     # --- presets ----------------------------------------------------------
     def settings(self) -> dict:
@@ -1028,6 +1134,7 @@ class MainWindow(QMainWindow):
                     "ai_sharpen": e["ai_sharpen"],
                     "sharpen": e["sharpen"],
                 },
+                "red_eye": {"enabled": self.re_group.isChecked()},
             },
         }
 
@@ -1045,6 +1152,7 @@ class MainWindow(QMainWindow):
                                     "luminance": d["luminance"] / 100, "color": d["color"] / 100},
                 "sharpening": {"enabled": False, "model": first(self.sharpen_box),
                                "ai_sharpen": d["ai_sharpen"] / 100, "sharpen": d["sharpen"] / 100},
+                "red_eye": {"enabled": False},
             },
         }
 
@@ -1094,6 +1202,7 @@ class MainWindow(QMainWindow):
                 for key in ENH_KEYS:
                     if key in section:
                         set_slider(key, section[key])
+            self.re_group.setChecked(bool(enh.get("red_eye", {}).get("enabled", False)))
         finally:
             self._applying = False
         self._sync_enh_view()
@@ -1160,7 +1269,10 @@ class MainWindow(QMainWindow):
             return False
         name = self.preset_box.currentData()
         try:
-            return not (name and self._same_settings(current, presets.load(name)))
+            saved = presets.load(name) if name else None
+            if saved is not None:  # presets from before red eye was a setting
+                saved.setdefault("enhancement", {}).setdefault("red_eye", {"enabled": False})
+            return not (saved and self._same_settings(current, saved))
         except Exception:
             return True
 
@@ -1228,8 +1340,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"Freeroom — {path.name} ({w}×{h}, {kind})")
         self.crop_btn.setEnabled(True)
         self.redeye_btn.setChecked(False)
-        self.redeye_btn.setEnabled(True)
+        self.redeye_found, self.redeye_kept = None, ()
         self.view.set_linear(photo.linear, photo.baseline_ev, self.g)
+        if self.re_group.isChecked():
+            self._redeye_search()
+        self._set_redeye_controls()
         if not self.busy:
             self.update_pipeline()
 
@@ -1390,7 +1505,7 @@ class MainWindow(QMainWindow):
             "photo": self.photo, "out": out, "g": self.g,
             "dn": self.results.get(dn_key), "sharp": self.results.get(sh_key),
             "dev": dict(self.dev_params), "enh": self.effective_enh(), "crop": self.view.crop,
-            "spots": self.view.spots,
+            "spots": None if self.re_group.isChecked() and self.redeye_found is None else self.view.spots,
         })
 
     def on_save_progress(self, done: int, total: int, label: str):

@@ -23,6 +23,23 @@ Three tabs, applied in this order:
    same only in its bright / dark parts. Greys are never changed.
 3. **Enhancement**: the AI steps below, shown on top of the development.
    Each section can be switched off.
+   **Red eye** (off by default) finds red eyes by itself when switched on. It
+   looks for clearly red, round blobs and pairs them: same size, and as far
+   apart as eyes are for a pupil that size (5–32 diameters), to either side.
+   A face detector ([YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet),
+   run by OpenCV, on the CPU; the small model is in `freeroom/data/`, MIT license) then
+   has to put a face's eyes on them, so tail lights and red patterns stay as they
+   are. A lone red pupil counts if a face's eye is on it. **Fix by hand** (`R`):
+   click near a pupil the search missed, using the loupe to see it at 100% (the
+   red circle is the search area, scroll to resize it); the other eye is found
+   with it. This has no face check, so a small round red thing you click on
+   does get fixed. Right-click removes a fix, Undo the last one, **Find again**
+   goes back to what the search found, Enter or Esc leaves the mode. Pupils
+   turn dark and neutral; catchlights and irises are kept. Fixes are masks
+   applied to every layer just before development, so the AI doesn't re-run and
+   the dials still work on top; like the AI steps they show on this tab and are in
+   the saved file. The on/off switch is part of presets, and batches search each
+   photo too; fixes by hand are per photo.
 
 **Library** (top bar, `G`; **Edit** = `E`): Freeroom starts here. Places
 (Pictures, Home, mounted drives: `/run/media`, `/media` or the Mac's `/Volumes`) and a folder tree on the left, thumbnails of
@@ -42,15 +59,6 @@ whole photo; pick an aspect ratio (Free, Original, 1:1, 3:2, 4:3, 5:4, 16:9;
 ⇄ swaps portrait / landscape). Enter applies, Esc undoes the changes. The view,
 loupe, histogram and saved file then show only the cropped part. The crop is
 kept per photo and isn't part of presets.
-
-**Red eye** (top bar, or `R`): click near a red pupil, using the loupe to see it
-at 100%. The red circle in the loupe is the search area (scroll to resize it);
-the pupil's centre has to be inside it, but the click doesn't have to be exact.
-Right-click removes a fix, Ctrl+Z / Undo removes the last one, Enter or Esc
-leaves the mode. The pupil turns dark and neutral; the catchlight and iris are
-kept. Fixes are masks applied to every layer just before development, so the AI
-doesn't re-run, the dials still work on top, and the file saved includes them.
-They're kept per photo, like the crop, and aren't part of presets or batches.
 
 **Batch…** (top bar): process a whole folder with a preset (or the current
 settings): pick the input and output folder, the format (JPEG, 16-bit TIFF or

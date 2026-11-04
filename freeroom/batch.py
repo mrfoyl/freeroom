@@ -13,7 +13,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import develop, engine, imageio, pipeline
+from . import develop, engine, imageio, pipeline, redeye
 
 FORMATS = {"JPEG": ".jpg", "TIFF 16-bit": ".tif", "PNG 16-bit": ".png"}
 
@@ -24,6 +24,7 @@ class Job:
     enh: dict  # effective enhancement sliders (sharpening off -> 0)
     denoise: Path | None  # AI model to run, None = step off
     sharpen: Path | None
+    redeye: bool = False
 
 
 def job_from_settings(settings: dict, enh_defaults: dict) -> Job:
@@ -53,7 +54,8 @@ def job_from_settings(settings: dict, enh_defaults: dict) -> Job:
     sharpening_on = sh.get("enabled", False)
     if not sharpening_on:
         enh["ai_sharpen"] = enh["sharpen"] = 0.0
-    return Job(dev, enh, model("denoise", nr, True), model("sharpen", sh, False))
+    red_eye = bool(sections.get("red_eye", {}).get("enabled", False))
+    return Job(dev, enh, model("denoise", nr, True), model("sharpen", sh, False), red_eye)
 
 
 def find_photos(folder: Path, recursive: bool) -> list[Path]:
@@ -109,7 +111,10 @@ class Processor:
         if cancelled and cancelled():
             return False
         stage("Developing")
-        rgb = pipeline.compose(photo.linear, dn, sharp, g, job.dev, photo.baseline_ev, job.enh)
+        spots = redeye.detect(photo.linear, photo.baseline_ev) if job.redeye else []
+        rgb = pipeline.compose(
+            photo.linear, dn, sharp, g, job.dev, photo.baseline_ev, job.enh, fix=lambda x: redeye.apply(x, spots)
+        )
         stage("Writing")
         out.parent.mkdir(parents=True, exist_ok=True)
         imageio.save(photo, np.clip(rgb, 0, 1), out)
