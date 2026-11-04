@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QStackedWidget,
     QTabWidget,
@@ -49,7 +50,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import batch, develop, engine, imageio, pipeline, presets
+from . import batch, develop, engine, imageio, pipeline, presets, redeye
 from .browser import LibraryView
 from .widgets import Histogram, PhotoView, ResetSlider
 
@@ -193,6 +194,7 @@ class Saver(QObject):
             rgb = pipeline.compose(
                 lin, dn, sharp, job["g"], job["dev"], job["photo"].baseline_ev, job["enh"],
                 base=base, progress=step,
+                fix=lambda x: redeye.apply(x, job["spots"], (y0, x0, y1, x1) if job["crop"] else None),
             )
             step(f"Writing {job['out'].name}")
             saved = imageio.save(job["photo"], rgb, job["out"])
@@ -526,6 +528,22 @@ class MainWindow(QMainWindow):
         self.view.crop_finished.connect(self.crop_finished)
         self._set_crop_controls()
 
+        self.redeye_btn = QPushButton("Red eye")
+        self.redeye_btn.setCheckable(True)
+        self.redeye_btn.setShortcut("R")
+        self.redeye_btn.setToolTip("Remove red eye (R). Click near a pupil; scroll = search size, right-click = remove a fix")
+        self.redeye_btn.setEnabled(False)
+        self.redeye_btn.toggled.connect(self.redeye_toggled)
+        self.redeye_undo = QPushButton("Undo")
+        self.redeye_undo.setShortcut("Ctrl+Z")
+        self.redeye_undo.setToolTip("Undo the last red eye fix (Ctrl+Z)")
+        self.redeye_undo.clicked.connect(lambda: self.view.set_spots(self.view.spots[:-1]))
+        self.redeye_clear = QPushButton("Clear red eye")
+        self.redeye_clear.clicked.connect(lambda: self.view.set_spots(()))
+        self.view.redeye_clicked.connect(self.on_redeye_click)
+        self.view.spots_changed.connect(self._set_redeye_controls)
+        self.view.redeye_finished.connect(lambda: self.redeye_btn.setChecked(False))
+
         self.progress = QProgressBar()
         self.progress.setMaximumWidth(220)
         self.progress.setTextVisible(True)
@@ -553,14 +571,18 @@ class MainWindow(QMainWindow):
         crop_gap = QLabel("   ")
         # shown only in Edit mode (hidden widgets' shortcuts, like C for crop, don't fire)
         self.edit_only = [self.save_btn, preset_label, self.preset_box, save_preset, del_preset,
-                          crop_gap, self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset]
+                          crop_gap, self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset,
+                          self.redeye_btn, self.redeye_undo, self.redeye_clear]
         top = QHBoxLayout()
         for w in (self.library_btn, self.edit_btn, QLabel("  "), open_btn, self.save_btn, preset_label,
                   self.preset_box, save_preset, del_preset, batch_btn, crop_gap, self.crop_btn,
-                  self.aspect_box, self.aspect_flip, self.crop_reset):
+                  self.aspect_box, self.aspect_flip, self.crop_reset, self.redeye_btn, self.redeye_undo,
+                  self.redeye_clear):
             top.addWidget(w)
-        top.addStretch(1)
-        top.addWidget(self.status)
+        # long texts (a saved path…) get cut off instead of widening the window
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        top.addWidget(self.status, 1)
         top.addWidget(self.progress)
         top.addWidget(self.cancel_btn)
 
@@ -575,7 +597,7 @@ class MainWindow(QMainWindow):
         hint = QLabel(
             "<b>Loupe</b> = 100% (1 photo pixel = 1 screen pixel).<br>"
             "Hold mouse button: before, in loupe · Hold Space: before, everywhere · "
-            "Scroll: loupe size.<br>"
+            "Scroll: loupe size. <b>R</b>: red eye.<br>"
             "<i>Before</i> = as shot on the Raw and B&amp;W tabs, unenhanced on the Enhancement tab."
         )
         hint.setStyleSheet("color: #999;")
@@ -676,11 +698,15 @@ class MainWindow(QMainWindow):
         (self.edit_btn if edit else self.library_btn).setChecked(True)
         for w in self.edit_only:
             w.setVisible(edit)
+        if edit:  # these show only when they apply
+            self._set_crop_controls()
+            self._set_redeye_controls()
         if edit:
             self.view.setFocus()
         else:
             if self.crop_btn.isChecked():
                 self.crop_btn.setChecked(False)
+            self.redeye_btn.setChecked(False)
             self.library.grid.setFocus()
 
     def open_folder_dialog(self):
@@ -917,6 +943,7 @@ class MainWindow(QMainWindow):
 
     def crop_toggled(self, on: bool):
         if on:
+            self.redeye_btn.setChecked(False)
             self._crop_before = self.view.crop
             self.aspect_changed()
         self.view.set_crop_mode(on)
@@ -954,6 +981,30 @@ class MainWindow(QMainWindow):
         cw, ch = (crop[2] - crop[0], crop[3] - crop[1]) if crop else (w, h)
         if self.crop_btn.isChecked() or crop:
             self.status.setText(f"Crop {cw}×{ch}" + ("" if self.crop_btn.isChecked() else " (C to change)"))
+
+    # --- red eye ----------------------------------------------------------
+    def _set_redeye_controls(self):
+        n = len(self.view.spots)
+        on = self.redeye_btn.isChecked()
+        self.redeye_undo.setVisible(on)
+        self.redeye_undo.setEnabled(n > 0)
+        self.redeye_clear.setVisible(on or n > 0)
+        self.redeye_btn.setText(f"Red eye ({n})" if n else "Red eye")
+
+    def redeye_toggled(self, on: bool):
+        if on:
+            self.crop_btn.setChecked(False)
+        self.view.set_redeye_mode(on)
+        self.view.setFocus()  # for Enter / Esc
+        self._set_redeye_controls()
+
+    def on_redeye_click(self, x: float, y: float, r: float):
+        spot = redeye.find(self.photo.linear, x, y, r, self.photo.baseline_ev)
+        if spot is None:
+            self.view.set_redeye_note("No red pupil found there. Click closer to it, or scroll to change the search size.")
+            return
+        self.view.set_spots((*self.view.spots, spot))
+        self.view.set_redeye_note(f"Fixed {len(self.view.spots)}. Click the next eye, or press Enter when done.")
 
     # --- presets ----------------------------------------------------------
     def settings(self) -> dict:
@@ -1176,6 +1227,8 @@ class MainWindow(QMainWindow):
         kind = f"RAW, base exposure +{photo.baseline_ev:.2f} EV" if photo.meta.get("raw") else f"{photo.meta.get('bits')}-bit"
         self.setWindowTitle(f"Freeroom — {path.name} ({w}×{h}, {kind})")
         self.crop_btn.setEnabled(True)
+        self.redeye_btn.setChecked(False)
+        self.redeye_btn.setEnabled(True)
         self.view.set_linear(photo.linear, photo.baseline_ev, self.g)
         if not self.busy:
             self.update_pipeline()
@@ -1337,6 +1390,7 @@ class MainWindow(QMainWindow):
             "photo": self.photo, "out": out, "g": self.g,
             "dn": self.results.get(dn_key), "sharp": self.results.get(sh_key),
             "dev": dict(self.dev_params), "enh": self.effective_enh(), "crop": self.view.crop,
+            "spots": self.view.spots,
         })
 
     def on_save_progress(self, done: int, total: int, label: str):

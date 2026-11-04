@@ -56,12 +56,14 @@ def compose(
     lut: np.ndarray | None = None,
     base: np.ndarray | None = None,
     progress: Callable[[str], None] | None = None,
+    fix: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> np.ndarray:
     """Final display image: develop original + AI layers, then blend them.
 
     dn / sharp are AI outputs in the encoding (None = that step is off).
     base = HDR base layer for these pixels (None: `linear` is the whole photo).
-    progress(label) is called before each step (see compose_steps)."""
+    progress(label) is called before each step (see compose_steps).
+    fix = correction of each linear layer before development (red eye)."""
     step = progress or (lambda label: None)
     if lut is None:
         lut = develop.build_lut(dev_params)
@@ -70,7 +72,7 @@ def compose(
         base = develop.hdr_base(develop.hdr_map(linear), linear.shape, linear.shape)
 
     def dev(x):
-        return develop.develop(x, dev_params, baseline_ev, lut, base)
+        return develop.develop(fix(x) if fix else x, dev_params, baseline_ev, lut, base)
 
     step("Developing")
     orig = dev(linear)

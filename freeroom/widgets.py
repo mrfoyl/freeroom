@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QLabel, QProgressBar, QSlider, QVBoxLayout, QWidget
 
-from . import develop, pipeline
+from . import develop, pipeline, redeye
 
 
 def to_qimage(rgb: np.ndarray, dpr: float = 1.0) -> QImage:
@@ -62,6 +62,9 @@ class PhotoView(QWidget):
     rendered = Signal(object, object, float)
     crop_changed = Signal(object)  # (x0, y0, x1, y1) or None
     crop_finished = Signal(bool)  # True = keep (Enter), False = cancel (Esc)
+    redeye_clicked = Signal(float, float, float)  # photo x, y, search radius
+    spots_changed = Signal()
+    redeye_finished = Signal()
     _request = Signal(object)
 
     HANDLE = 9  # px: grab distance of the crop handles
@@ -96,6 +99,11 @@ class PhotoView(QWidget):
         self.crop_mode = False
         self.crop_aspect: float | None = None  # width / height, None = free
         self._drag: tuple | None = None  # (kind, start photo point, start crop)
+        # red eye: fixes of this photo (a tuple, so a background render keeps its own)
+        self.spots: tuple[redeye.Spot, ...] = ()
+        self.redeye_mode = False
+        self.redeye_r = 60.0  # search radius in photo px, set per photo
+        self.redeye_note = ""  # result of the last click, shown in the banner
         # Loading overlay in the middle of the view (busy bar: decoders don't report progress)
         self._loading = QWidget(self)
         self._loading_text = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
@@ -158,8 +166,34 @@ class PhotoView(QWidget):
         self._hdr_map = None
         self.crop = None
         self.crop_changed.emit(None)
+        self.spots = ()
+        self.spots_changed.emit()
+        h, w, _ = linear.shape
+        self.redeye_r = max(12.0, max(h, w) / 70)
         self._small = {}
         self._rebuild_small()
+
+    # --- red eye ----------------------------------------------------------
+    def set_redeye_mode(self, on: bool):
+        self.redeye_mode = on
+        self.redeye_note = ""
+        self.setCursor(Qt.CursorShape.CrossCursor if on else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_redeye_note(self, text: str):
+        self.redeye_note = text
+        self.update()
+
+    def set_spots(self, spots):
+        self.spots = tuple(spots)
+        self.spots_changed.emit()
+        self._render_view()
+        self.update()
+
+    def _spot_at(self, x: float, y: float) -> redeye.Spot | None:
+        """The fix under a photo point (nearest one if several)."""
+        near = [s for s in self.spots if np.hypot(s.cx - x, s.cy - y) <= max(s.radius * 1.5, self.redeye_r)]
+        return min(near, key=lambda s: np.hypot(s.cx - x, s.cy - y), default=None)
 
     # --- crop -------------------------------------------------------------
     def set_crop_mode(self, on: bool):
@@ -344,11 +378,16 @@ class PhotoView(QWidget):
         if self.mode == "develop" and original:
             return develop.develop(lin, develop.DEFAULTS, self.baseline_ev, self._default_lut)
         base = self._base(lin.shape, region)
+        spots = self.spots
+
+        def fix(x):
+            return redeye.apply(x, spots, region)
+
         if self.mode == "enhance" and not original:
             return pipeline.compose(
-                lin, dn, sharp, self.g, self.dev_params, self.baseline_ev, self.enh_params, self._lut, base
+                lin, dn, sharp, self.g, self.dev_params, self.baseline_ev, self.enh_params, self._lut, base, fix=fix
             )
-        return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut, base)
+        return develop.develop(fix(lin), self.dev_params, self.baseline_ev, self._lut, base)
 
     def _render_view(self):
         """Ask for the view to be re-rendered (in the background, newest state wins)."""
@@ -401,8 +440,36 @@ class PhotoView(QWidget):
         p.drawImage(self._rect.topLeft(), self._original_image() if self.show_orig_all else self._view_img)
         if self.crop_mode:
             self._paint_crop(p)
-        elif self.mouse is not None and self._rect.contains(self.mouse):
+            return
+        if self.redeye_mode:
+            self._paint_spots(p)
+            self._paint_banner(p)
+        if self.mouse is not None and self._rect.contains(self.mouse):
             self._paint_loupe(p)
+            if self.redeye_mode:  # the search area, at the loupe's 100% scale
+                r = self.redeye_r / self.devicePixelRatioF()
+                p.setPen(QPen(QColor(255, 80, 80, 230), 1.5))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(self.mouse, r, r)
+
+    def _paint_banner(self, p: QPainter):
+        lines = "Click near a red pupil  ·  Scroll: search size  ·  Right-click: remove a fix  ·  Enter: done"
+        if self.redeye_note:
+            lines += "\n" + self.redeye_note
+        box = p.fontMetrics().boundingRect(self.rect().adjusted(20, 0, -20, 0), Qt.TextFlag.TextWordWrap, lines)
+        box = QRectF(box).adjusted(-12, -6, 12, 6)
+        box.moveTo((self.width() - box.width()) / 2, 10)
+        p.fillRect(box, QColor(20, 20, 22, 215))
+        p.setPen(QColor(235, 235, 235))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, lines)
+
+    def _paint_spots(self, p: QPainter):
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(QPen(QColor(120, 255, 140), 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        k = self._rect.width() / (self._region()[2] - self._region()[0])
+        for s in self.spots:
+            p.drawEllipse(self._to_widget(s.cx, s.cy), max(s.radius * k, 4.0), max(s.radius * k, 4.0))
 
     def _paint_crop(self, p: QPainter):
         x0, y0, x1, y1 = self._crop_box()
@@ -502,6 +569,14 @@ class PhotoView(QWidget):
                 kind = self._hit(e.position()) or "new"
                 self._drag = (kind, self._to_photo(e.position()), self._crop_box())
             return
+        if self.redeye_mode and self.linear is not None:
+            if self._rect.contains(e.position()):
+                x, y = self._to_photo(e.position())
+                if e.button() == Qt.MouseButton.LeftButton:
+                    self.redeye_clicked.emit(x, y, self.redeye_r)
+                elif e.button() == Qt.MouseButton.RightButton and (spot := self._spot_at(x, y)) is not None:
+                    self.set_spots(s for s in self.spots if s is not spot)
+            return
         self.show_orig_loupe = True
         self.update()
 
@@ -513,6 +588,11 @@ class PhotoView(QWidget):
         self.update()
 
     def wheelEvent(self, e):
+        if self.redeye_mode:  # size of the search area instead of the loupe
+            factor = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
+            self.redeye_r = float(np.clip(self.redeye_r * factor, 6.0, 1000.0))
+            self.update()
+            return
         step = 20 if e.angleDelta().y() > 0 else -20
         self.radius = int(np.clip(self.radius + step, 60, 500))
         self.update()
@@ -520,6 +600,8 @@ class PhotoView(QWidget):
     def keyPressEvent(self, e):
         if self.crop_mode and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
             self.crop_finished.emit(e.key() != Qt.Key.Key_Escape)
+        elif self.redeye_mode and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+            self.redeye_finished.emit()
         elif e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
             self.show_orig_all = True
             self.update()
