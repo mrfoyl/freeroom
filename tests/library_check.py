@@ -5,6 +5,7 @@
 import os, sys, time
 from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["XDG_CONFIG_HOME"] = str(Path(__file__).parent / "out" / "config")  # never the user's real settings
 from PySide6.QtWidgets import QApplication
 from freeroom import app as appmod, browser
 

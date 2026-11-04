@@ -6,6 +6,7 @@ RAW file (read-only), presets, and the GUI offscreen.
 import os, sys, time
 from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+os.environ["XDG_CONFIG_HOME"] = str(Path(__file__).parent / "out" / "config")  # never the user's real settings
 import numpy as np, cv2
 
 out_dir = Path(__file__).parent / "out"
