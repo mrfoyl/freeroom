@@ -113,7 +113,7 @@ each platform:
 | Other Linux with distrobox | Fedora distrobox | CUDA or CPU | ⚠️ Untested; same route as Bazzite |
 | Linux with an NVIDIA GPU, native | native | CUDA | ⚠️ Untested |
 | Linux with a supported AMD GPU | native or distrobox | ROCm 6.4 | ⚠️ Untested on a supported card (see AMD below) |
-| macOS 14+, Apple Silicon | native + `Freeroom.app` | Metal (Apple GPU) | ⚠️ Untested on a real Mac (installer and app bundle checked in a simulated run) |
+| macOS 14+, Apple Silicon | native + `Freeroom.app` | Metal (Apple GPU) | ✅ Tested on an M-series Mac |
 | macOS on Intel | — | — | ❌ Not supported (PyTorch 2.8 has no Intel Mac build); the installer stops with a message |
 | Linux on ARM, Windows | — | — | ❌ Not supported |
 
