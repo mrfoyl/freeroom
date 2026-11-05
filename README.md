@@ -106,6 +106,7 @@ each platform:
 
 | Platform | How it installs | PyTorch | Status |
 |---|---|---|---|
+| macOS 14+, Apple Silicon | native + `Freeroom.app` | Metal (Apple GPU) | ✅ Tested on an M1 Mac and an M1 Max Mac Studio |
 | Debian 13 | native | CPU | ✅ Tested on a real desktop (KDE, Wayland) and in a clean container |
 | Ubuntu 24.04 | native | CPU | ✅ Tested in a clean container |
 | Fedora 43 | native | CPU | ✅ Tested in a clean container |
@@ -113,7 +114,6 @@ each platform:
 | Other Linux with distrobox | Fedora distrobox | CUDA or CPU | ⚠️ Untested; same route as Bazzite |
 | Linux with an NVIDIA GPU, native | native | CUDA | ⚠️ Untested |
 | Linux with a supported AMD GPU | native or distrobox | ROCm 6.4 | ⚠️ Untested on a supported card (see AMD below) |
-| macOS 14+, Apple Silicon | native + `Freeroom.app` | Metal (Apple GPU) | ✅ Tested on an M1 Mac and an M1 Max Mac Studio |
 | macOS on Intel | — | — | ❌ Not supported (PyTorch 2.8 has no Intel Mac build); the installer stops with a message |
 | Linux on ARM, Windows | — | — | ❌ Not supported |
 
