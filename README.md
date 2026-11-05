@@ -202,3 +202,45 @@ Any 1x RGB model spandrel (+ extra arches) can load can be dropped into either f
 
 Saves go to `~/Pictures/freeroom/` by default; the original is never
 overwritten. JPEG keeps EXIF + ICC; TIFF/PNG are 16-bit (no EXIF).
+
+## Credits
+
+Freeroom stands on the work of these people and projects. Thank you.
+
+AI models (downloaded by `setup/download-models.sh` from their authors' own
+releases, not part of this repo):
+- **SCUNet** denoising: Kai Zhang, Yawei Li, Jingyun Liang, Jiezhang Cao,
+  Yulun Zhang, Hao Tang, Deng-Ping Fan, Radu Timofte and Luc Van Gool,
+  *Practical Blind Image Denoising via Swin-Conv-UNet and Data Synthesis*.
+  [cszn/SCUNet](https://github.com/cszn/SCUNet) (Apache-2.0); weights from
+  [cszn/KAIR](https://github.com/cszn/KAIR) (MIT).
+- **Restormer** deblurring: Syed Waqas Zamir, Aditya Arora, Salman Khan,
+  Munawar Hayat, Fahad Shahbaz Khan and Ming-Hsuan Yang, *Restormer: Efficient
+  Transformer for High-Resolution Image Restoration* (CVPR 2022).
+  [swz30/Restormer](https://github.com/swz30/Restormer) (MIT).
+- **YuNet** face detection, used to find eyes for red eye: Shiqi Yu and
+  contributors, [libfacedetection](https://github.com/ShiqiYu/libfacedetection),
+  model from [opencv/opencv_zoo](https://github.com/opencv/opencv_zoo). The
+  model is bundled in `freeroom/data/` under its MIT license
+  (`freeroom/data/YUNET_LICENSE.txt`).
+
+Libraries (installed by `setup/install.sh`, each under its own license):
+- [spandrel](https://github.com/chaiNNer-org/spandrel) and
+  spandrel-extra-arches by the chaiNNer team: load and run the models (MIT).
+  The extra arches package holds architectures whose licences may be
+  restrictive; check them before any commercial use.
+- [PyTorch](https://pytorch.org) (BSD-3-Clause)
+- [Qt](https://www.qt.io) through [PySide6](https://doc.qt.io/qtforpython/) (LGPLv3)
+- [LibRaw](https://www.libraw.org) (LGPL-2.1 or CDDL-1.0) through
+  [rawpy](https://github.com/letmaik/rawpy) (MIT): RAW decoding
+- [OpenCV](https://opencv.org) (Apache-2.0)
+- [NumPy](https://numpy.org) (BSD-3-Clause), [Pillow](https://python-pillow.org)
+  (MIT-CMU), [tifffile](https://github.com/cgohlke/tifffile) and
+  [imagecodecs](https://github.com/cgohlke/imagecodecs) by Christoph Gohlke
+  (BSD-3-Clause)
+- [uv](https://github.com/astral-sh/uv) by Astral, used by the installer
+
+## License
+
+Freeroom's own code is under the [MIT License](LICENSE). The models and
+libraries above keep their own licenses.
