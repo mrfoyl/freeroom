@@ -24,12 +24,18 @@ Three tabs, applied in this order:
 3. **Enhancement**: the AI steps below, shown on top of the development.
    Each section can be switched off.
    **Red eye** (off by default) finds red eyes by itself when switched on. It
-   looks for clearly red, round blobs and pairs them: same size, and as far
-   apart as eyes are for a pupil that size (5–32 diameters), to either side.
-   A face detector ([YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet),
+   looks for faces first, then for red pupils where they have their eyes; for
+   faces it doesn't see that way, it pairs clearly red, round blobs: same size,
+   and as far apart as eyes are for a pupil that size (5–32 diameters), to either
+   side. A face detector ([YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet),
    run by OpenCV, on the CPU; the small model is in `freeroom/data/`, MIT license) then
    has to put a face's eyes on them, so tail lights and red patterns stay as they
-   are. A lone red pupil counts if a face's eye is on it. **Fix by hand** (`R`):
+   are. A lone red pupil counts if a face's eye is on it. In a blurred photo the
+   red mixes with what's around it and the pupil smears, so a weaker blob also
+   counts as the partner of a sure eye, or when both of a pair are on a face; the
+   fix is as soft as the eye. Very dim maroon pupils are left alone: half a fix
+   looks worse than none. Colours are measured before clipping, so this also works
+   on underexposed RAW files. **Fix by hand** (`R`):
    click near a pupil the search missed, using the loupe to see it at 100% (the
    red circle is the search area, scroll to resize it); the other eye is found
    with it. This has no face check, so a small round red thing you click on

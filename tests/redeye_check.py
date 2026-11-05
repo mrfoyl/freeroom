@@ -127,6 +127,16 @@ for i, x in enumerate((100, 2600, 5000)):
 e3 = [(int(ex + x), int(ey)) for x in (100, 2600, 5000) for ex, ey in F_EYES]
 print("three faces:", got(paint(wide, e3), e3))
 
+# blur: one eye clearly red, the other mixed with what's around it, smeared by motion
+def blurred_eye(base, sure_eye, weak_eye, size=31):
+    t = base.copy(); cv2.circle(t, tuple(map(int, sure_eye)), PR, (225, 25, 35), -1)
+    cv2.circle(t, tuple(map(int, weak_eye)), PR, (225, 60, 70), -1)
+    k = np.zeros((size, size), np.float32); k[size // 2, :] = 1 / size
+    return develop.srgb_to_linear(cv2.filter2D(t, -1, k).astype(np.float32) / 255)
+print("motion blur, weaker second eye:", got(blurred_eye(face, *F_EYES), F_EYES, PR * 2))
+lone = face.copy(); cv2.circle(lone, tuple(map(int, F_EYES[0])), PR, (200, 110, 112), -1)
+print("only a weak red on one eye, no partner:", got(develop.srgb_to_linear(cv2.GaussianBlur(lone, (0, 0), 3.0).astype(np.float32) / 255), []))
+
 # things that aren't eyes: pairs of red round lights, a red pattern, a red shape on the face
 plain = np.full((2000, 3000, 3), (70, 75, 80), np.uint8)
 lights = plain.copy(); cv2.circle(lights, (1000, 1000), 30, (220, 26, 34), -1); cv2.circle(lights, (1500, 1000), 30, (220, 26, 34), -1)
