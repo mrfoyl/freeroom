@@ -1,4 +1,5 @@
-"""Enhancements on the Raw tab, and AI steps stopping when switched off mid-run.
+"""Enhancements on the Raw tab, AI steps stopping when switched off mid-run, and
+saving while an enhancement runs.
 
     python tests/stop_check.py
 
@@ -51,8 +52,13 @@ def started():  # the run is under way: at least one tile done
 win.open_path(src); wait(lambda: not win.loading)
 dn_models = [win.denoise_box.itemData(i) for i in range(win.denoise_box.count())]
 
-# 1. Noise reduction switched off while it runs: the run stops, nothing is kept
+# 0. Opening the Enhancement tab starts nothing; Run enhancement does
 win.tabs.setCurrentWidget(win.enh_tab)
+wait(lambda: False, 1)
+check("Enhancement tab alone starts nothing", not win.busy and not win.results and win.run_btn.isEnabled())
+
+# 1. Noise reduction switched off while it runs: the run stops, nothing is kept
+win.run_enhancement()
 wait(started, 60)
 check("denoise started", win.busy)
 win.nr_group.setChecked(False)
@@ -61,7 +67,7 @@ check("NR off mid-run stops it", not win.busy and t < 5, f"({t:.1f}s, {win.statu
 check("no denoise result kept", not any(k[1] == "dn" for k in win.results))
 
 # 2. Sharpening switched off while denoise runs: denoise finishes, sharpen never runs
-win.sh_group.setChecked(True); win.nr_group.setChecked(True)
+win.sh_group.setChecked(True); win.nr_group.setChecked(True); win.run_enhancement()
 wait(started, 60)
 win.sh_group.setChecked(False)
 wait()
@@ -71,13 +77,13 @@ check("sharpen off mid-denoise: denoise kept, no sharpen", kinds == ["dn"], str(
 # 3. Another model picked mid-run: the old run stops, the new model's result is kept
 if len(dn_models) > 1:
     win.photo_gen += 1; win.results.clear()  # same photo, forget results so it runs again
-    win.update_pipeline()
+    win.run_enhancement()
     wait(started, 60)
-    win.denoise_box.setCurrentIndex(1)
-    wait()
+    win.denoise_box.setCurrentIndex(1); win.run_enhancement()  # asked while busy: runs when the old one stops
+    wait(); wait()
     models = [k[2] for k in win.results if k[1] == "dn"]
     check("model change mid-run: only the new model's result", models == [dn_models[1]], str([m.stem for m in models]))
-    win.denoise_box.setCurrentIndex(0); wait()
+    win.denoise_box.setCurrentIndex(0); win.run_enhancement(); wait()
 
 # 4. Raw tab keeps showing the enhancements
 win.sliders["exposure"][0].setValue(30)
@@ -97,6 +103,38 @@ ref = develop.develop(sm["linear"], develop.DEFAULTS, v.baseline_ev, v._default_
 check("Raw tab 'before' is still the default development", np.allclose(before, ref))
 check("no AI run started from the Raw tab", not win.busy)
 win.grab().save(str(out_dir / "gui_raw_enhanced.png"))
+
+# 5. Saving while an enhancement runs asks: save now (cancels) or wait, then save
+from unittest import mock
+from PySide6.QtWidgets import QMessageBox
+
+
+def save_while_running(choice: str, name: str):
+    win.photo_gen += 1; win.results.clear()  # forget results so it runs again
+    win.run_enhancement()
+    wait(started, 60)
+    f = out_dir / name; f.unlink(missing_ok=True)
+    asked = []
+
+    def answer(box):
+        asked.append(box.text())
+        box.clickedButton = lambda: next(b for b in box.buttons() if b.text() == choice)
+    with mock.patch.object(QMessageBox, "exec", answer), \
+         mock.patch.object(appmod.QFileDialog, "getSaveFileName", return_value=(str(f), "")):
+        win.save_dialog()
+    return f, asked
+
+
+f, asked = save_while_running("Save now", "stop_saved_now.jpg")
+check("save while running asks", bool(asked), str(asked))
+wait(lambda: f.exists() and not win.saving and not win.busy, 120)
+check("Save now: saved, enhancement cancelled", f.exists() and not any(k[1] == "dn" for k in win.results),
+      win.status.text())
+f, asked = save_while_running("Wait, then save", "stop_saved_after.jpg")
+check("Wait: not saved while it runs", win.busy and not f.exists())
+wait(lambda: f.exists() and not win.saving, 300)
+check("Wait: saved once the enhancement is done", f.exists() and any(k[1] == "dn" for k in win.results),
+      win.status.text())
 
 win.close()
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

@@ -76,16 +76,19 @@ preset's AI steps (once each) and its development, exactly like saving it by
 hand; crops are per photo, so batches don't crop. Cancel stops after the
 current AI tile; a photo that fails is logged and the batch goes on.
 
-Each AI model runs **at most once per photo** (when you first view it on the
-Enhancement tab, or on save). The models work on a fixed encoding of the
+Each AI model runs **at most once per photo**, and only when you press
+**Run enhancement** on the Enhancement tab, or on save. Opening the tab starts
+nothing. The models work on a fixed encoding of the
 linear photo, not on the developed one, so their results are kept and the
 dials are applied on top afterwards: changing development, switching tabs,
 toggling sections or going back to a model you already tried is instant.
-Only a new photo (or a model not yet tried on this one) runs the AI again.
+Only a new photo (or a model not yet tried on this one) needs the AI again.
 Switching a section off (or picking another model) while its AI step is still
 running stops that step after the current tile; finished results are kept.
 **Cancel** (next to the progress bar) stops a run after the current tile;
-it then waits until you change a model or reopen the Enhancement tab.
+press Run enhancement to start it again. Saving while a run is going asks
+whether to **save now** (the run is cancelled and the photo is saved with the
+AI steps that have finished) or **wait** and save when the run is done.
 
 The RGB range view (histogram) above the tabs shows the current result, with
 clip markers and a note when a RAW has highlight data past white.
