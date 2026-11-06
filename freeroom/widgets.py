@@ -49,9 +49,10 @@ class PhotoView(QWidget):
 
     Everything is rendered on the fly from the linear photo (+ the AI layers,
     which are stored in the pipeline encoding), so dials are always instant.
-    Two modes, one per tab:
-      "develop": developed photo (before = default development)
-      "enhance": developed photo + AI layers (before = developed photo)
+    Both tabs show the finished photo (development + the AI layers there are,
+    enhancement sliders, red eye fixes); the mode only picks the "before":
+      "develop": before = default development
+      "enhance": before = developed photo without enhancements
 
     Crop: `crop` = (x0, y0, x1, y1) in photo pixels, or None. In crop mode the
     whole photo is shown with the crop frame to edit; otherwise only the
@@ -323,8 +324,7 @@ class PhotoView(QWidget):
 
     def set_enh_params(self, params: dict):
         self.enh_params = dict(params)
-        if self.mode == "enhance":
-            self._render_view()
+        self._render_view()
 
     def set_mode(self, mode: str):
         self.mode = mode
@@ -334,8 +334,7 @@ class PhotoView(QWidget):
         """The AI layers changed (or the worker filled in more tiles)."""
         self._small.pop("dn", None)
         self._small.pop("sharp", None)
-        if self.mode == "enhance":
-            self._rebuild_small()
+        self._rebuild_small()
 
     def _target_rect(self) -> QRectF:
         x0, y0, x1, y1 = self._region()
@@ -360,9 +359,8 @@ class PhotoView(QWidget):
                 self._small[name] = cv2.resize(arr[y0:y1, x0:x1], size, interpolation=cv2.INTER_AREA)
 
         small("linear", self.linear)
-        if self.mode == "enhance":
-            small("dn", self.dn)
-            small("sharp", self.sharp)
+        small("dn", self.dn)
+        small("sharp", self.sharp)
         self._render_view()
 
     def _base(self, out_shape, region) -> np.ndarray | None:
@@ -383,7 +381,7 @@ class PhotoView(QWidget):
         def fix(x):
             return redeye.apply(x, spots, region)
 
-        if self.mode == "enhance" and not original:
+        if not original:
             return pipeline.compose(
                 lin, dn, sharp, self.g, self.dev_params, self.baseline_ev, self.enh_params, self._lut, base, fix=fix
             )

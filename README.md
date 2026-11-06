@@ -22,7 +22,8 @@ Three tabs, applied in this order:
    that colour lighter/darker, with **High** / **Low** underneath doing the
    same only in its bright / dark parts. Greys are never changed.
 3. **Enhancement**: the AI steps below, shown on top of the development.
-   Each section can be switched off.
+   Each section can be switched off. The enhancements stay on when you go
+   back to the Raw tab, so you develop the finished photo.
    **Red eye** (off by default) finds red eyes by itself when switched on. It
    looks for faces first, then for red pupils where they have their eyes; for
    faces it doesn't see that way, it pairs clearly red, round blobs: same size,
@@ -43,8 +44,8 @@ Three tabs, applied in this order:
    goes back to what the search found, Enter or Esc leaves the mode. Pupils
    turn dark and neutral; catchlights and irises are kept. Fixes are masks
    applied to every layer just before development, so the AI doesn't re-run and
-   the dials still work on top; like the AI steps they show on this tab and are in
-   the saved file. The on/off switch is part of presets, and batches search each
+   the dials still work on top; like the AI steps they show on both tabs and are
+   in the saved file. The on/off switch is part of presets, and batches search each
    photo too; fixes by hand are per photo.
 
 **Library** (top bar, `G`; **Edit** = `E`): Freeroom starts here. Places
@@ -81,6 +82,8 @@ linear photo, not on the developed one, so their results are kept and the
 dials are applied on top afterwards: changing development, switching tabs,
 toggling sections or going back to a model you already tried is instant.
 Only a new photo (or a model not yet tried on this one) runs the AI again.
+Switching a section off (or picking another model) while its AI step is still
+running stops that step after the current tile; finished results are kept.
 **Cancel** (next to the progress bar) stops a run after the current tile;
 it then waits until you change a model or reopen the Enhancement tab.
 

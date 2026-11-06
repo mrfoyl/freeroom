@@ -124,6 +124,13 @@ class Worker(QObject):
         super().__init__()
         self.models: dict[Path, engine.Restorer] = {}  # kept loaded; they're small
         self.cancel = False
+        # Result keys the settings still need, replaced by the GUI thread when they
+        # change: a stage outside it is skipped, or stopped after its current tile.
+        self.wanted: frozenset = frozenset()
+        self.ran = 0  # stages completed in the last job
+
+    def _wanted(self, key) -> bool:
+        return key in self.wanted
 
     def _model(self, path: Path) -> engine.Restorer:
         if path not in self.models:
@@ -135,17 +142,24 @@ class Worker(QObject):
         """Run (key, label, model, src, dst) stages in order. dst starts as a copy of src."""
         try:
             t0 = time.monotonic()
+            self.ran = 0
             for key, label, path, src, dst in stages:
+                if not self._wanted(key):
+                    continue  # switched off before it started
                 model = self._model(path)
                 dst[:] = src
                 self.stage.emit(key)
                 self.status.emit(f"{label} with {path.stem}…")
-                if not model.run(src, dst, progress=self.progress.emit, cancelled=lambda: self.cancel):
-                    self.finished.emit(False, 0.0)
-                    return
+                stop = lambda: self.cancel or not self._wanted(key)  # noqa: E731
+                if not model.run(src, dst, progress=self.progress.emit, cancelled=stop):
+                    if self.cancel:
+                        self.finished.emit(False, 0.0)
+                        return
+                    continue  # switched off while running: drop it, go on with the rest
                 if label == "Sharpening":
                     engine.keep_detail(src, dst)
                 self.stage_done.emit(key)
+                self.ran += 1
             self.finished.emit(True, time.monotonic() - t0)
         except Exception as e:  # surface anything (OOM, bad model file) in the UI
             self.failed.emit(f"{type(e).__name__}: {e}")
@@ -965,7 +979,7 @@ class MainWindow(QMainWindow):
     def tab_changed(self, _):
         enhance = self.tabs.currentWidget() is self.enh_tab
         if not enhance:
-            self.redeye_btn.setChecked(False)  # fixes show on this tab only, like the AI steps
+            self.redeye_btn.setChecked(False)  # fixing by hand is on the Enhancement tab
         self.view.set_mode("enhance" if enhance else "develop")
         if enhance:
             self.update_pipeline()
@@ -1376,14 +1390,18 @@ class MainWindow(QMainWindow):
         then save if a save is waiting."""
         if self.photo is None or self.denoise_box.count() == 0:
             return
+        dn_key, sh_key = self._keys()
+        wanted = frozenset(k for k in (dn_key, sh_key) if k is not None)
+        if self.busy:
+            # Steps that were switched off (or got another model) stop after their
+            # current tile; the rest of the job goes on and its results are kept.
+            self.worker.wanted = wanted
+        self._show_layers()  # the Raw tab shows the results there are, too
         if self.tabs.currentWidget() is not self.enh_tab and self.save_target is None:
             return
-        self._show_layers()
         if self.busy:
-            # Let the running job finish (its result is kept), then come back here.
-            self.pending = True
+            self.pending = True  # come back here when the job ends
             return
-        dn_key, sh_key = self._keys()
         stages = []
         if dn_key is not None and dn_key not in self.results or sh_key is not None and sh_key not in self.results:
             if self.enc_orig is None:
@@ -1403,6 +1421,7 @@ class MainWindow(QMainWindow):
                 self._do_save()
             return
         self.worker.cancel = False
+        self.worker.wanted = wanted
         self.cancelled = False
         self.busy = True
         self.progress.setValue(0)
@@ -1452,8 +1471,10 @@ class MainWindow(QMainWindow):
 
     def on_finished(self, ok: bool, seconds: float):
         self._job_ended()
-        if ok:
+        if ok and self.worker.ran:
             self.status.setText(f"Done in {seconds:.1f} s · {engine.device_name()}")
+        elif ok:
+            self.status.setText("Stopped: the AI step was switched off")
         asked_again, self.pending = self.pending, False
         self._show_layers()
         if self.cancelled and not ok and not asked_again:
