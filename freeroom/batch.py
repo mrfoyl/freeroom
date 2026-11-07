@@ -15,7 +15,20 @@ import numpy as np
 
 from . import develop, engine, imageio, pipeline, redeye
 
-FORMATS = {"JPEG": ".jpg", "TIFF 16-bit": ".tif", "PNG 16-bit": ".png"}
+# name: (extension, imageio.save options). Sizes for a 26 MP RAW: JPEG ~18 MB,
+# JPEG XL 5-10 MB (16-bit, but not every program opens it), TIFF/PNG 16-bit
+# ~140 MB, 8-bit about a fifth of that.
+FORMATS = {
+    "JPEG": (".jpg", {"jpeg_quality": 95}),
+    "JPEG smaller (quality 85)": (".jpg", {"jpeg_quality": 85}),
+    "JPEG XL 16-bit, high quality": (".jxl", {"jxl_distance": 0.5}),
+    "JPEG XL 16-bit, standard": (".jxl", {"jxl_distance": 1.0}),
+    "JPEG XL 16-bit, lossless": (".jxl", {"jxl_distance": 0.0}),
+    "TIFF 16-bit": (".tif", {"bits": 16}),
+    "TIFF 8-bit (smaller)": (".tif", {"bits": 8}),
+    "PNG 16-bit": (".png", {"bits": 16}),
+    "PNG 8-bit (smaller)": (".png", {"bits": 8}),
+}
 
 
 @dataclass
@@ -88,6 +101,7 @@ class Processor:
         stage: Callable[[str], None] = lambda s: None,
         tiles: Callable[[int, int], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        options: dict | None = None,
     ) -> bool:
         """Develop src into out. Returns False if cancelled (nothing written)."""
         stage("Loading")
@@ -117,5 +131,5 @@ class Processor:
         )
         stage("Writing")
         out.parent.mkdir(parents=True, exist_ok=True)
-        imageio.save(photo, np.clip(rgb, 0, 1), out)
+        imageio.save(photo, np.clip(rgb, 0, 1), out, **(options or {}))
         return True

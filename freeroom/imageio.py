@@ -15,6 +15,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from . import metadata
 from .develop import auto_exposure, srgb_to_linear
 
 RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".raf", ".rw2", ".orf", ".dng", ".pef", ".srw"}
@@ -29,8 +30,9 @@ class Photo:
     path: Path
     linear: np.ndarray  # HxWx3 float32 scene-linear RGB (sRGB primaries), upright
     baseline_ev: float = 0.0  # exposure that makes a RAW look normal; 0 for JPEG etc.
-    exif: bytes | None = None
+    exif: bytes | None = None  # EXIF to save with it (metadata.carry)
     icc: bytes | None = None
+    xmp: bytes | None = None
     meta: dict = field(default_factory=dict)
 
 
@@ -39,6 +41,7 @@ def load(path: str | Path) -> Photo:
     ext = path.suffix.lower()
     photo = _load_raw(path) if ext in RAW_EXTS else _load_raster(path)
     photo.meta["shot"] = shot_info(path)
+    photo.exif, photo.xmp = metadata.carry(path, photo.meta["shot"])
     return photo
 
 
@@ -71,28 +74,29 @@ def shot_info(path: str | Path) -> dict:
     path = Path(path)
     info: dict = {}
     try:
-        with Image.open(path) as im:
-            ex = im.getexif()
-            sub = ex.get_ifd(0x8769)
-            make, model = _text(ex.get(271)), _text(ex.get(272))
-            info["camera"] = model if model.lower().startswith(make.lower()) else f"{make} {model}".strip()
-            lens_make, lens = _text(sub.get(42035)), _text(sub.get(42036))
-            info["lens"] = lens if not lens_make or lens.lower().startswith(lens_make.lower()) else f"{lens_make} {lens}"
-            iso = sub.get(34855)
-            info["iso"] = _num(iso[0] if isinstance(iso, (tuple, list)) else iso)
-            info["shutter"] = _num(sub.get(33434))
-            info["aperture"] = _num(sub.get(33437))
-            info["focal"] = _num(sub.get(37386))
-            info["focal35"] = _num(sub.get(41989))
-            info["bias"] = _num(sub.get(37380))
-            if (flash := sub.get(37385)) is not None:
-                info["flash"] = bool(int(flash) & 1)
-            info["program"] = EXPOSURE_PROGRAMS.get(sub.get(34850))
-            if taken := _text(sub.get(36867) or ex.get(306)):
-                try:
-                    info["taken"] = datetime.datetime.strptime(taken[:19], "%Y:%m:%d %H:%M:%S")
-                except ValueError:
-                    pass
+        ex, _ = metadata.read_exif(path)  # also ORF / RW2
+        if ex is None:
+            raise ValueError("no EXIF")
+        sub = ex.get_ifd(0x8769)
+        make, model = _text(ex.get(271)), _text(ex.get(272))
+        info["camera"] = model if model.lower().startswith(make.lower()) else f"{make} {model}".strip()
+        lens_make, lens = _text(sub.get(42035)), _text(sub.get(42036))
+        info["lens"] = lens if not lens_make or lens.lower().startswith(lens_make.lower()) else f"{lens_make} {lens}"
+        iso = sub.get(34855)
+        info["iso"] = _num(iso[0] if isinstance(iso, (tuple, list)) else iso)
+        info["shutter"] = _num(sub.get(33434))
+        info["aperture"] = _num(sub.get(33437))
+        info["focal"] = _num(sub.get(37386))
+        info["focal35"] = _num(sub.get(41989))
+        info["bias"] = _num(sub.get(37380))
+        if (flash := sub.get(37385)) is not None:
+            info["flash"] = bool(int(flash) & 1)
+        info["program"] = EXPOSURE_PROGRAMS.get(sub.get(34850))
+        if taken := _text(sub.get(36867) or ex.get(306)):
+            try:
+                info["taken"] = datetime.datetime.strptime(taken[:19], "%Y:%m:%d %H:%M:%S")
+            except ValueError:
+                pass
     except Exception:
         pass  # not readable by Pillow (CR3, RAF, …): LibRaw below
     if path.suffix.lower() in RAW_EXTS:
@@ -255,22 +259,23 @@ def _load_raster(path: Path) -> Photo:
         bits = 32
         linear = srgb_to_linear(rgb)
 
-    exif = icc = None
+    icc = None
     try:
         with Image.open(path) as im:
             icc = im.info.get("icc_profile")
-            ex = im.getexif()
-            if ex:
-                # Pixels are already rotated upright, so reset the tag.
-                ex[EXIF_ORIENTATION] = 1
-                exif = ex.tobytes()
     except Exception:
         pass
-    return Photo(path, linear, exif=exif, icc=icc, meta={"bits": bits, "raw": False})
+    return Photo(path, linear, icc=icc, meta={"bits": bits, "raw": False})
 
 
-def save(photo: Photo, rgb: np.ndarray, out_path: str | Path, jpeg_quality: int = 95) -> Path:
-    """Save developed display-sRGB `rgb` (0..1)."""
+SAVE_EXTS = {".jpg", ".jpeg", ".jxl", ".tif", ".tiff", ".png"}
+
+
+def save(photo: Photo, rgb: np.ndarray, out_path: str | Path, jpeg_quality: int = 95, bits: int = 16,
+         jxl_distance: float = 1.0) -> Path:
+    """Save developed display-sRGB `rgb` (0..1). `bits` (8 or 16) is for TIFF and
+    PNG; 8-bit files are about a fifth the size. JPEG is always 8-bit. JPEG XL is
+    16-bit; `jxl_distance` 0 = lossless, 0.5 high quality, 1 visually lossless."""
     out_path = Path(out_path)
     if out_path.resolve() == photo.path.resolve():
         raise ValueError("Refusing to overwrite the original photo. Pick another file name.")
@@ -278,19 +283,42 @@ def save(photo: Photo, rgb: np.ndarray, out_path: str | Path, jpeg_quality: int 
     ext = out_path.suffix.lower()
     rgb = np.clip(rgb, 0.0, 1.0)
 
+    h, w = rgb.shape[:2]
+    ex = metadata.for_output(photo.exif, w, h)  # camera, lens, exposure, date, GPS…
+    icc = photo.icc or metadata.srgb_icc()  # RAWs are developed to sRGB
+
+    if ext == ".jxl":
+        import imagecodecs
+
+        px = (rgb * 65535.0 + 0.5).astype(np.uint16)
+        if jxl_distance <= 0:
+            stream = imagecodecs.jpegxl_encode(px, lossless=True, effort=3)
+        else:
+            stream = imagecodecs.jpegxl_encode(px, distance=jxl_distance, effort=7)
+        out_path.write_bytes(metadata.jxl_container(stream, ex, photo.xmp))
+        return out_path
+
     if ext in {".tif", ".tiff", ".png"}:
-        # 16-bit lossless
-        bgr16 = cv2.cvtColor((rgb * 65535.0 + 0.5).astype(np.uint16), cv2.COLOR_RGB2BGR)
-        if not cv2.imwrite(str(out_path), bgr16):
-            raise OSError(f"Could not write {out_path}")
+        # lossless, 16-bit unless asked for 8
+        if bits == 8:
+            px = (rgb * 255.0 + 0.5).astype(np.uint8)
+        else:
+            px = (rgb * 65535.0 + 0.5).astype(np.uint16)
+        if ext == ".png":
+            ok, png = cv2.imencode(".png", cv2.cvtColor(px, cv2.COLOR_RGB2BGR))
+            if not ok:
+                raise OSError(f"Could not write {out_path}")
+            out_path.write_bytes(metadata.add_png_metadata(png.tobytes(), ex, photo.xmp, icc))
+        else:
+            metadata.write_tiff(out_path, px, ex, photo.xmp, icc)
         return out_path
 
     im = Image.fromarray((rgb * 255.0 + 0.5).astype(np.uint8), "RGB")
-    kwargs = {}
-    if photo.exif:
-        kwargs["exif"] = photo.exif
-    if photo.icc:
-        kwargs["icc_profile"] = photo.icc
+    kwargs = {"icc_profile": icc}
+    if ex is not None:
+        kwargs["exif"] = ex.tobytes()
+    if photo.xmp:
+        kwargs["xmp"] = photo.xmp
     if ext in {".jpg", ".jpeg"}:
         kwargs.update(quality=jpeg_quality, subsampling=0)
     buf = io.BytesIO()

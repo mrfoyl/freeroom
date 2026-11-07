@@ -207,7 +207,22 @@ Any 1x RGB model spandrel (+ extra arches) can load can be dropped into either f
 `tests/real_photo.py <photo>` = comparison crop on a real photo (read-only).
 
 Saves go to `~/Pictures/freeroom/` by default; the original is never
-overwritten. JPEG keeps EXIF + ICC; TIFF/PNG are 16-bit (no EXIF).
+overwritten. Formats (save dialog and Batch):
+- **JPEG** (quality 95), or **JPEG smaller** (85): 8-bit, opens everywhere.
+- **JPEG XL 16-bit**, *high quality*, *standard* or *lossless*: keeps 16-bit
+  precision for further editing at a fraction of the size (standard is about
+  a fifth of a JPEG 95 at the same measured quality). Recent Lightroom,
+  Photoshop, GIMP 3, darktable and Apple devices (macOS 14 / iOS 17) open it;
+  many browsers and Windows without an add-on don't, so share JPEGs.
+- **TIFF** / **PNG**, lossless, 16-bit or 8-bit. 16-bit is big: a 26 MP RAW
+  gives about 140 MB (100 MB after AI noise reduction), as its finest bits are
+  sensor noise no lossless compression can shrink; 8-bit is about a fifth.
+
+16-bit only matters if you keep editing the photo in another program.
+All formats keep the photo's metadata, also from RAW: camera, lens, exposure, date, GPS, copyright and XMP (keywords,
+ratings), plus a colour profile. Left out: the camera's maker note and the
+original's thumbnail. Orientation and pixel size are set for the saved photo.
+RAWs whose EXIF can't be read (CR3, RAF) keep camera, lens, exposure and date.
 
 ## Credits
 

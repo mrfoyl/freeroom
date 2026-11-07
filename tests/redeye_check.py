@@ -190,7 +190,7 @@ a = save("redeye_saved.png"); print("saved full, pupils RGB:", [a[y + 20, x - 25
 v.set_crop((1000, 1000, 3000, 2000)); wait(limit=0.3)
 a = save("redeye_saved_crop.png"); print("saved crop, pupils RGB:", [a[y + 20 - 1000, x - 25 - 1000].tolist() for x, y in EYES], "size", a.shape[:2])
 v.set_crop(None)
-win.tabs.setCurrentIndex(0); wait(limit=0.5); print("Raw tab shows no fix, like the AI steps (saved file has it):", shown_at(ex - 25, ey + 20)); print("hand mode off there:", not v.redeye_mode)
+win.tabs.setCurrentIndex(0); wait(limit=0.5); print("Raw tab shows the fix too (dark):", shown_at(ex - 25, ey + 20)); print("hand mode off there:", not v.redeye_mode)
 s_on = win.settings(); print("in settings:", s_on["enhancement"]["red_eye"], "| not default:", not win._same_settings(s_on, win.default_settings()))
 win.tabs.setCurrentWidget(win.enh_tab)
 

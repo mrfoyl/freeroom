@@ -214,7 +214,7 @@ class Saver(QObject):
                 fix=lambda x: redeye.apply(x, spots, (y0, x0, y1, x1) if job["crop"] else None),
             )
             step(f"Writing {job['out'].name}")
-            saved = imageio.save(job["photo"], rgb, job["out"])
+            saved = imageio.save(job["photo"], rgb, job["out"], **job.get("options", {}))
             self.saved.emit(str(saved))
         except Exception as e:
             self.failed.emit(str(e))
@@ -260,7 +260,7 @@ class BatchWorker(QObject):
                 continue
             try:
                 ok = self.processor.process(src, out, job, lambda st, n=name: self.stage.emit(f"{n}: {st}…"),
-                                            self.tiles.emit, lambda: self.cancel)
+                                            self.tiles.emit, lambda: self.cancel, plan["options"])
                 if ok:
                     self.file_done.emit("done", f"{name} → {out.relative_to(plan['out_dir'])}")
             except Exception as e:  # keep going with the next photo
@@ -391,7 +391,8 @@ class BatchDialog(QDialog):
         if not photos:
             raise ValueError("No photos in the input folder.")
         return {"photos": photos, "job": job, "in_dir": in_dir, "out_dir": out_dir,
-                "ext": batch.FORMATS[self.format.currentText()], "suffix": self.suffix.text().strip(),
+                "ext": batch.FORMATS[self.format.currentText()][0], "options": batch.FORMATS[self.format.currentText()][1],
+                "suffix": self.suffix.text().strip(),
                 "overwrite": self.overwrite.isChecked()}
 
     def _update_summary(self):
@@ -512,6 +513,7 @@ class MainWindow(QMainWindow):
         self.enh_requested = False  # Run enhancement pressed: the AI steps only start then, or on save
         self.quiet_cancel = False  # cancelled to save now: the save's status stays
         self.save_target: Path | None = None
+        self.save_options: dict = {}  # imageio.save options of the format picked in the save dialog
         self._applying = False  # loading a preset: hold back pipeline runs
 
         self.view = PhotoView()
@@ -1546,16 +1548,16 @@ class MainWindow(QMainWindow):
             save_now = box.clickedButton() is now_btn
         SAVE_DIR.mkdir(parents=True, exist_ok=True)
         suggested = SAVE_DIR / f"{self.photo.path.stem}_edit.jpg"
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save photo",
-            str(suggested),
-            "JPEG (*.jpg);;TIFF 16-bit (*.tif);;PNG 16-bit (*.png)",
-        )
+        filters = {f"{name} (*{ext})": (ext, opts) for name, (ext, opts) in batch.FORMATS.items()}
+        path, chosen = QFileDialog.getSaveFileName(self, "Save photo", str(suggested), ";;".join(filters))
         if not path:
             return
         out = Path(path)
-        if out.suffix.lower() not in {".jpg", ".jpeg", ".tif", ".tiff", ".png"}:
+        ext, opts = filters.get(chosen, (None, {}))
+        # the picked format's options, unless the name typed asks for another format
+        same = ext and out.suffix.lower() in (ext, ext.replace(".tif", ".tiff"), ext.replace(".jpg", ".jpeg"))
+        self.save_options = dict(opts) if same else {}
+        if out.suffix.lower() not in imageio.SAVE_EXTS:
             out = out.with_suffix(".jpg")
         if out.resolve() == self.photo.path.resolve():
             QMessageBox.warning(self, "Could not save", "Refusing to overwrite the original photo.")
@@ -1578,11 +1580,12 @@ class MainWindow(QMainWindow):
         settings as they are now (changing sliders meanwhile doesn't affect it)."""
         out, self.save_target = self.save_target, None
         dn_key, sh_key = self._keys()
+        options = self.save_options
         self.saving = True
         self.save_btn.setEnabled(False)
         self.view.set_progress(f"Saving {out.name}…", 0)
         self.start_save.emit({
-            "photo": self.photo, "out": out, "g": self.g,
+            "photo": self.photo, "out": out, "g": self.g, "options": options,
             "dn": self.results.get(dn_key), "sharp": self.results.get(sh_key),
             "dev": dict(self.dev_params), "enh": self.effective_enh(), "crop": self.view.crop,
             "spots": None if self.re_group.isChecked() and self.redeye_found is None else self.view.spots,
