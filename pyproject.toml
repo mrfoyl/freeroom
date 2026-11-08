@@ -14,6 +14,7 @@ dependencies = [
     "tifffile>=2024.8",
     "imagecodecs>=2024.6",
     "PySide6>=6.7",
+    "transformers>=5.0",
 ]
 
 # PyTorch build, pick exactly one (setup/install.sh does this by itself):

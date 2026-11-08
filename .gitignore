@@ -5,3 +5,4 @@ tests/out/
 .venv/
 freeroom/assets/
 .install
+models/segment/

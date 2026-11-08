@@ -14,15 +14,17 @@ are applied on top (see pipeline.py), so only a new photo re-runs the AI.
 
 from __future__ import annotations
 
+import copy
 import sys
 import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 
+import cv2
 import numpy as np
-from PySide6.QtCore import QObject, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QKeySequence
+from PySide6.QtCore import QEvent, QObject, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -32,11 +34,13 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGroupBox,
+    QToolButton,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -50,7 +54,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import batch, develop, engine, imageio, pipeline, presets, redeye
+from . import batch, develop, engine, imageio, layers, pipeline, presets, redeye, segment
 from .browser import LibraryView
 from .widgets import Histogram, PhotoView, ResetSlider
 
@@ -195,6 +199,8 @@ class Saver(QObject):
                 self.progress.emit(done[0], total, label)
                 done[0] += 1
 
+            total += 2 * len(job.get("layers", []))
+            full_lin = job["photo"].linear
             lin, dn, sharp, base = job["photo"].linear, job["dn"], job["sharp"], None
             spots = job["spots"]
             if spots is None:  # saved before the search for red eyes had finished
@@ -208,11 +214,25 @@ class Saver(QObject):
                 lin = lin[cut]
                 dn = None if dn is None else dn[cut]
                 sharp = None if sharp is None else sharp[cut]
+            fix = lambda x: redeye.apply(x, spots, (y0, x0, y1, x1) if job["crop"] else None)  # noqa: E731
             rgb = pipeline.compose(
                 lin, dn, sharp, job["g"], job["dev"], job["photo"].baseline_ev, job["enh"],
-                base=base, progress=step,
-                fix=lambda x: redeye.apply(x, spots, (y0, x0, y1, x1) if job["crop"] else None),
+                base=base, progress=step, fix=fix,
             )
+            H, W = full_lin.shape[:2]
+            region = (y0, x0, y1, x1) if job["crop"] else (0, 0, H, W)
+            for n, d in enumerate(job.get("layers", []), 1):
+                step(f"Developing layer {n}")
+                cut = np.s_[region[0]:region[2], region[1]:region[3]]
+                lbase = None
+                if d["dev"].get("hdr") and job["crop"]:
+                    lbase = develop.hdr_base(develop.hdr_map(full_lin), full_lin.shape, lin.shape[:2], region)
+                above = pipeline.compose(
+                    lin, None if d["dn"] is None else d["dn"][cut], None if d["sharp"] is None else d["sharp"][cut],
+                    job["g"], d["dev"], job["photo"].baseline_ev, d["enh"], base=lbase, fix=fix,
+                )
+                step(f"Blending layer {n}")
+                rgb = layers.blend(rgb, above, layers.region_mask(d["mask"], (H, W), region, lin.shape[:2]))
             step(f"Writing {job['out'].name}")
             saved = imageio.save(job["photo"], rgb, job["out"], **job.get("options", {}))
             self.saved.emit(str(saved))
@@ -231,6 +251,37 @@ class RedEyeFinder(QObject):
             self.found.emit(gen, tuple(redeye.detect(linear, baseline_ev)))
         except Exception as e:
             self.failed.emit(gen, str(e))
+
+
+class SegWorker(QObject):
+    """AI selection (SAM) off the GUI thread: reads a photo once, then a mask per prompt set."""
+
+    ready = Signal(int)  # photo generation
+    masked = Signal(int, int, object)  # photo generation, layer id, probability mask (work size)
+    failed = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.seg: segment.Segmenter | None = None
+        self.gen = -1
+
+    def prepare(self, gen: int, linear_small: np.ndarray, baseline_ev: float):
+        try:
+            if self.seg is None:
+                self.seg = segment.Segmenter()
+            self.seg.set_image(develop.develop(linear_small, develop.DEFAULTS, baseline_ev))
+            self.gen = gen
+            self.ready.emit(gen)
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
+
+    def predict(self, gen: int, uid: int, points: list, labels: list):
+        if gen != self.gen:
+            return  # for a photo that has been closed
+        try:
+            self.masked.emit(gen, uid, self.seg.predict(points, labels))
+        except Exception as e:
+            self.failed.emit(f"{type(e).__name__}: {e}")
 
 
 class BatchWorker(QObject):
@@ -489,6 +540,8 @@ class MainWindow(QMainWindow):
     start_load = Signal(int, object)
     start_save = Signal(object)
     start_find = Signal(int, object, float)
+    start_seg = Signal(int, object, float)
+    start_mask = Signal(int, int, object, object)
 
     def __init__(self):
         super().__init__()
@@ -513,6 +566,12 @@ class MainWindow(QMainWindow):
         self.save_target: Path | None = None
         self.save_options: dict = {}  # imageio.save options of the format picked in the save dialog
         self._applying = False  # loading a preset: hold back pipeline runs
+        # layers above the base; the tabs edit the active one (None = Base)
+        self.layers: list[layers.Layer] = []
+        self.active: int | None = None
+        self.base_settings: dict | None = None  # the Base's settings while a layer is edited
+        self._switching = False  # loading a layer's settings into the tabs
+        self.seg_gen = -1  # photo the AI selection has read (or is reading)
 
         self.view = PhotoView()
         self.hist = Histogram()
@@ -621,6 +680,7 @@ class MainWindow(QMainWindow):
         side = QVBoxLayout()
         side.addWidget(QLabel("<b>Range</b> (R G B)"))
         side.addWidget(self.hist)
+        side.addWidget(self._build_layers_box())
         side.addWidget(self.tabs, 1)
         side.addWidget(hint)
         side_w = QWidget()
@@ -681,6 +741,20 @@ class MainWindow(QMainWindow):
         self.finder.failed.connect(self.on_redeye_failed)
         self.saving = False
         self.load_thread.start()
+
+        self.seg_thread = QThread(self)
+        self.segworker = SegWorker()
+        self.segworker.moveToThread(self.seg_thread)
+        self.start_seg.connect(self.segworker.prepare)
+        self.start_mask.connect(self.segworker.predict)
+        self.segworker.ready.connect(self.on_seg_ready)
+        self.segworker.masked.connect(self.on_masked)
+        self.segworker.failed.connect(self.on_seg_failed)
+        self.seg_thread.start()
+        self.view.mask_clicked.connect(self.on_mask_click)
+        self.view.mask_stroked.connect(self.on_mask_stroke)
+        self.view.mask_finished.connect(lambda: self._set_mask_tool(None))
+        QShortcut(QKeySequence.StandardKey.Undo, self.view, self.mask_undo)
 
         self.refresh = QTimer(self)
         self.refresh.setInterval(400)
@@ -828,7 +902,7 @@ class MainWindow(QMainWindow):
 
         def toggled(on):
             self.dev_params[flag] = on
-            self.view.set_dev_params(self.dev_params)
+            self._push_dev()
 
         group.toggled.connect(toggled)
         return group
@@ -947,6 +1021,380 @@ class MainWindow(QMainWindow):
         lay.addStretch(1)
         return tab
 
+    # --- layers -------------------------------------------------------------
+    def _build_layers_box(self) -> QWidget:
+        """The Layers panel, under a header that folds it away (folded at start)."""
+        self.layers_toggle = QToolButton()
+        self.layers_toggle.setCheckable(True)
+        self.layers_toggle.setChecked(False)
+        self.layers_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.layers_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.layers_toggle.setAutoRaise(True)
+        self.layers_toggle.setStyleSheet("QToolButton { font-weight: bold; border: none; }")
+        self.layers_toggle.toggled.connect(self._fold_layers)
+        box = QGroupBox()
+        self.layers_body = box
+        box.setVisible(False)
+        self.layer_list = QListWidget()
+        self.layer_list.setMaximumHeight(74)
+        self.layer_list.addItem("Base")
+        self.layer_list.setCurrentRow(0)
+        self.layer_list.currentRowChanged.connect(lambda row: self.set_active(None if row <= 0 else row - 1))
+        self.layer_list.itemChanged.connect(self._layer_item_changed)
+        self.layer_list.setMouseTracking(True)  # hover a layer: its area shows on the photo
+        self.layer_list.itemEntered.connect(self._hover_item)
+        self.layer_list.viewport().installEventFilter(self)
+        self._hover: layers.Layer | None = None
+        self.add_layer_btn = QPushButton("New layer")
+        self.add_layer_btn.setToolTip("A layer with its own Raw, B&W and Enhancement settings, inside a selection")
+        self.add_layer_btn.clicked.connect(self.add_layer)
+        self.copy_layer_btn = QPushButton("Copy")
+        self.copy_layer_btn.setToolTip("A copy of this layer: same selection and settings, placed above it")
+        self.copy_layer_btn.clicked.connect(self.copy_layer)
+        self.del_layer_btn = QPushButton("Delete")
+        self.del_layer_btn.clicked.connect(self.delete_layer)
+        self.magic_btn = QPushButton("Magic select")
+        self.magic_btn.setToolTip("Click an object and the AI selects it; right-click or Ctrl+click: not this")
+        self.brush_btn = QPushButton("Brush")
+        self.brush_btn.setToolTip("Paint foreground (left) and background (right or Ctrl); the AI follows your strokes")
+        for b, tool in ((self.magic_btn, "magic"), (self.brush_btn, "brush")):
+            b.setCheckable(True)
+            b.clicked.connect(lambda on, t=tool: self._set_mask_tool(t if on else None))
+        self.mask_undo_btn = QPushButton("Undo")
+        self.mask_undo_btn.clicked.connect(self.mask_undo)
+        self.mask_clear_btn = QPushButton("Clear")
+        self.mask_clear_btn.clicked.connect(self.mask_clear)
+        self.invert_box = QCheckBox("Invert")
+        self.invert_box.toggled.connect(lambda on: self._layer_option("invert", on))
+        self.show_mask_box = QCheckBox("Show selection")
+        self.show_mask_box.toggled.connect(lambda _: self._show_mask())
+        self.feather = QSlider(Qt.Orientation.Horizontal)
+        self.feather.setRange(0, 100)
+        self.feather.setToolTip("Feather: softens the edge of the selection")
+        self.feather.valueChanged.connect(lambda v: self._layer_option("feather", v))
+        self.opacity = QSlider(Qt.Orientation.Horizontal)
+        self.opacity.setRange(0, 100)
+        self.opacity.setValue(100)
+        self.opacity.valueChanged.connect(lambda v: self._layer_option("opacity", v / 100))
+        self.layer_note = QLabel("Editing: Base")
+        self.layer_note.setStyleSheet("color: #999;")
+        self.layer_note.setWordWrap(True)
+
+        lay = QVBoxLayout(box)
+        lay.addWidget(self.layer_list)
+        row = QHBoxLayout()
+        for w in (self.add_layer_btn, self.copy_layer_btn, self.del_layer_btn):
+            row.addWidget(w)
+        lay.addLayout(row)
+        row = QHBoxLayout()
+        for w in (self.magic_btn, self.brush_btn, self.mask_undo_btn, self.mask_clear_btn):
+            row.addWidget(w)
+        lay.addLayout(row)
+        form = QFormLayout()
+        opts = QHBoxLayout()
+        opts.addWidget(self.invert_box)
+        opts.addWidget(self.show_mask_box)
+        form.addRow(opts)
+        form.addRow("Feather", self.feather)
+        form.addRow("Opacity", self.opacity)
+        lay.addLayout(form)
+        lay.addWidget(self.layer_note)
+        self._layer_controls()
+        panel = QWidget()
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(2)
+        outer.addWidget(self.layers_toggle)
+        outer.addWidget(box)
+        return panel
+
+    def _fold_layers(self, open_: bool):
+        self.layers_toggle.setArrowType(Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow)
+        self.layers_body.setVisible(open_)
+        if not open_:
+            self._hover_item(None)
+
+    def _layer_controls(self):
+        L = self.active_layer()
+        has_photo = self.photo is not None
+        self.add_layer_btn.setEnabled(has_photo)
+        for w in (self.del_layer_btn, self.copy_layer_btn, self.magic_btn, self.brush_btn, self.mask_undo_btn, self.mask_clear_btn,
+                  self.invert_box, self.show_mask_box, self.feather, self.opacity):
+            w.setEnabled(L is not None)
+        if L is not None and not segment.available():
+            for b in (self.magic_btn, self.brush_btn):
+                b.setEnabled(False)
+                b.setToolTip("The AI selection model is missing: run setup/download-models.sh")
+        n = len(self.layers)
+        self.layers_toggle.setText("Layers" + (f" ({n})" if n else "")
+                                   + ("" if L is None else f"  ·  editing {L.name}"))
+        if L is None:
+            self.layer_note.setText("Editing: Base (the whole photo)")
+        else:
+            self.layer_note.setText(f"Editing: {L.name}. The tabs below change only its selection"
+                                    + (" (empty: select something first)." if L.empty() else "."))
+
+    def active_layer(self) -> layers.Layer | None:
+        return None if self.active is None else self.layers[self.active]
+
+    def _stack(self, finished_only: bool = False) -> list[dict]:
+        """Layers for rendering: visible ones with a selection, bottom first."""
+        out = []
+        ui = self._ui_settings() if self.active is not None else None
+        for i, L in enumerate(self.layers):
+            if not L.visible or L.empty():
+                continue
+            st = ui if i == self.active else L.settings
+            dn_key, sh_key = self._keys_of(st)
+            get = self.results.get if finished_only else self._layer
+            out.append({"mask": L.mask, "dev": dict(st["development"]), "enh": self._enh_of(st),
+                        "dn": get(dn_key) if dn_key else None, "sharp": get(sh_key) if sh_key else None})
+        return out
+
+    def _push_stack(self):
+        if self._switching:
+            return
+        if self.active is not None:
+            self.layers[self.active].settings = self._ui_settings()
+        self.view.set_stack(self._stack())
+
+    def add_layer(self):
+        if self.photo is None:
+            return
+        h, w = self.photo.linear.shape[:2]
+        n = 1 + max([int(L.name.split()[-1]) for L in self.layers if L.name.split()[-1].isdigit()], default=0)
+        # starts as a copy of the Base, so nothing changes until you edit it
+        L = layers.Layer(f"Layer {n}", copy.deepcopy(self.settings()), segment.work_shape(h, w), (h, w))
+        self.layers.append(L)
+        item = QListWidgetItem(L.name)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        self.layer_list.addItem(item)
+        self.layer_list.setCurrentRow(len(self.layers))  # selects it (set_active)
+        if segment.available():
+            self.magic_btn.setChecked(True)
+            self._set_mask_tool("magic")
+
+    def copy_layer(self):
+        """Duplicate the active layer just above it (its undo history stays behind)."""
+        i = self.active
+        if i is None:
+            return
+        src = self.layers[i]
+        src.settings = self._ui_settings()
+        self._set_mask_tool(None)
+        names = {L.name for L in self.layers}
+        name, n = f"{src.name} copy", 2
+        while name in names:
+            name, n = f"{src.name} copy {n}", n + 1
+        L = layers.Layer(name, copy.deepcopy(src.settings), src.work, src.full, visible=src.visible,
+                         invert=src.invert, feather=src.feather, opacity=src.opacity, points=list(src.points),
+                         ai=None if src.ai is None else src.ai.copy(), paint=src.paint.copy())
+        self.layers.insert(i + 1, L)
+        item = QListWidgetItem(L.name)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked if L.visible else Qt.CheckState.Unchecked)
+        self.layer_list.blockSignals(True)
+        self.layer_list.insertItem(i + 2, item)
+        self.layer_list.blockSignals(False)
+        self.set_active(i + 1)
+
+    def delete_layer(self):
+        i = self.active
+        if i is None:
+            return
+        self._set_mask_tool(None)
+        self.layer_list.setCurrentRow(0)  # back to the Base first
+        del self.layers[i]
+        self.layer_list.blockSignals(True)
+        self.layer_list.takeItem(i + 1)
+        self.layer_list.blockSignals(False)
+        self.view.set_stack(self._stack())
+        self.update_pipeline()  # a model only that layer used may stop
+        self._layer_controls()
+
+    def _clear_layers(self):
+        """A new photo: layers belong to the old one."""
+        if self.active is not None:
+            self.set_active(None)
+        self._set_mask_tool(None)
+        self.layers.clear()
+        self.layer_list.blockSignals(True)
+        while self.layer_list.count() > 1:
+            self.layer_list.takeItem(1)
+        self.layer_list.setCurrentRow(0)
+        self.layer_list.blockSignals(False)
+        self.view.set_stack([])
+        self.view.set_mask_show(None)
+        self._layer_controls()
+
+    def _layer_item_changed(self, item: QListWidgetItem):
+        row = self.layer_list.row(item)
+        if row >= 1:
+            self.layers[row - 1].visible = item.checkState() == Qt.CheckState.Checked
+            self._push_stack()
+
+    def set_active(self, idx: int | None):
+        """Which layer the tabs edit (None = Base)."""
+        if idx == self.active:
+            return
+        ui = self._ui_settings()
+        if self.active is None:
+            self.base_settings = ui
+        else:
+            self.layers[self.active].settings = ui
+        self.active = idx
+        target = copy.deepcopy(self.base_settings if idx is None else self.layers[idx].settings)
+        target["enhancement"]["red_eye"] = ui["enhancement"]["red_eye"]  # red eye is for the whole photo
+        self._switching = True
+        try:
+            self.apply_settings(target, run_pipeline=False)
+        finally:
+            self._switching = False
+        if idx is None:
+            self.base_settings = None
+        base = self._all_settings()[0]
+        self.view.set_dev_params(dict(base["development"]))
+        self.view.set_enh_params(self._enh_of(base))
+        self.view.set_stack(self._stack())
+        if self.layer_list.currentRow() != (0 if idx is None else idx + 1):
+            self.layer_list.blockSignals(True)
+            self.layer_list.setCurrentRow(0 if idx is None else idx + 1)
+            self.layer_list.blockSignals(False)
+        L = self.active_layer()
+        if L is None:
+            self._set_mask_tool(None)
+        else:
+            for wdg, val in ((self.invert_box, L.invert), (self.feather, round(L.feather)), (self.opacity, round(L.opacity * 100))):
+                wdg.blockSignals(True)
+                wdg.setChecked(val) if isinstance(wdg, QCheckBox) else wdg.setValue(val)
+                wdg.blockSignals(False)
+        self._show_mask()
+        self._layer_controls()
+        self.update_pipeline()
+
+    def _layer_option(self, name: str, value):
+        L = self.active_layer()
+        if L is None:
+            return
+        setattr(L, name, float(value) if name != "invert" else bool(value))
+        L.rebuild()
+        self._mask_changed(L)
+
+    def _show_mask(self):
+        if self._hover is not None and any(L is self._hover for L in self.layers):  # hovered in the list
+            self.view.set_mask_show(self._hover.mask)
+            return
+        L = self.active_layer()
+        on = L is not None and (self.show_mask_box.isChecked() or self.view.mask_tool is not None)
+        self.view.set_mask_show(L.mask if on else None)
+
+    def _hover_item(self, item: QListWidgetItem | None):
+        row = -1 if item is None else self.layer_list.row(item)
+        L = self.layers[row - 1] if row >= 1 and row - 1 < len(self.layers) else None
+        if L is not self._hover:
+            self._hover = L
+            self._show_mask()
+
+    def eventFilter(self, obj, ev):
+        if obj is self.layer_list.viewport():
+            if ev.type() == QEvent.Type.Leave:
+                self._hover_item(None)
+            elif ev.type() == QEvent.Type.MouseMove and self.layer_list.itemAt(ev.position().toPoint()) is None:
+                self._hover_item(None)
+        return super().eventFilter(obj, ev)
+
+    def _mask_changed(self, L: layers.Layer):
+        if L is self.active_layer():
+            self._show_mask()
+        self.view.set_stack(self._stack())
+        self._layer_controls()
+
+    def _set_mask_tool(self, tool: str | None):
+        if tool is not None and (self.active_layer() is None or not self._ensure_seg()):
+            tool = None
+        self.magic_btn.setChecked(tool == "magic")
+        self.brush_btn.setChecked(tool == "brush")
+        if tool is not None:
+            self.crop_btn.setChecked(False)
+            self.redeye_btn.setChecked(False)
+        self.view.set_mask_tool(tool)
+        self._show_mask()
+
+    def _ensure_seg(self) -> bool:
+        """Have the AI selection read this photo (once)."""
+        if not segment.available():
+            self.status.setText("AI selection model missing: run setup/download-models.sh")
+            return False
+        if self.seg_gen != self.photo_gen:
+            self.seg_gen = self.photo_gen
+            h, w = self.photo.linear.shape[:2]
+            wh, ww = segment.work_shape(h, w)
+            small = cv2.resize(self.photo.linear, (ww, wh), interpolation=cv2.INTER_AREA)
+            self.view.set_mask_note("Reading the photo for AI selection…")
+            self.start_seg.emit(self.photo_gen, small, self.photo.baseline_ev)
+        return True
+
+    def on_seg_ready(self, gen: int):
+        if gen == self.photo_gen:
+            self.view.set_mask_note("")
+
+    def on_seg_failed(self, msg: str):
+        self.seg_gen = -1
+        self.view.set_mask_note("AI selection failed: " + msg)
+        self.status.setText("AI selection failed")
+
+    def _ask_mask(self, L: layers.Layer):
+        if not L.points:
+            return
+        k = L.scale
+        self.view.set_mask_note("Selecting…")
+        self.start_mask.emit(self.photo_gen, L.uid, [(x * k, y * k) for x, y, _ in L.points],
+                             [lab for _, _, lab in L.points])
+
+    def on_mask_click(self, x: float, y: float, keep: bool):
+        L = self.active_layer()
+        if L is None:
+            return
+        L.snapshot()
+        L.points.append((x, y, 1 if keep else 0))
+        self._ask_mask(L)
+
+    def on_mask_stroke(self, pts: list, radius: float, keep: bool):
+        L = self.active_layer()
+        if L is None or not pts:
+            return
+        L.snapshot()
+        L.stroke(pts, radius, keep)
+        # the stroke also guides the AI: its start, middle and end
+        for i in sorted({0, len(pts) // 2, len(pts) - 1}):
+            L.points.append((pts[i][0], pts[i][1], 1 if keep else 0))
+        L.rebuild()
+        self._mask_changed(L)  # the painted part shows at once
+        self._ask_mask(L)
+
+    def on_masked(self, gen: int, uid: int, prob: np.ndarray):
+        if gen != self.photo_gen:
+            return
+        L = next((L for L in self.layers if L.uid == uid), None)
+        if L is None:
+            return
+        L.ai = prob
+        L.rebuild()
+        self.view.set_mask_note("")
+        self._mask_changed(L)
+
+    def mask_undo(self):
+        L = self.active_layer()
+        if L is not None and L.undo_last():
+            self._mask_changed(L)
+
+    def mask_clear(self):
+        L = self.active_layer()
+        if L is not None:
+            L.clear()
+            self._mask_changed(L)
+
     # --- settings changes -----------------------------------------------
     def _reset(self, keys: list[str]):
         for key in keys:
@@ -958,11 +1406,28 @@ class MainWindow(QMainWindow):
 
     def dev_changed(self, key: str, value: float):
         self.dev_params[key] = value
-        self.view.set_dev_params(self.dev_params)
+        self._push_dev()
 
     def enh_changed(self, key: str, value: float):
         self.enh_params[key] = value
-        self.view.set_enh_params(self.effective_enh())
+        self._push_enh()
+
+    def _push_dev(self):
+        """Development changed in the tabs: it belongs to the Base or the active layer."""
+        if self._switching:
+            return
+        if self.active is None:
+            self.view.set_dev_params(self.dev_params)
+        else:
+            self._push_stack()
+
+    def _push_enh(self):
+        if self._switching:
+            return
+        if self.active is None:
+            self.view.set_enh_params(self.effective_enh())
+        else:
+            self._push_stack()
 
     def enh_settings_changed(self):
         self._sync_enh_view()
@@ -971,7 +1436,7 @@ class MainWindow(QMainWindow):
 
     def _sync_enh_view(self):
         self.sliders["ai_sharpen"][0].setEnabled(self.sharpen_box.currentData() is not None)
-        self.view.set_enh_params(self.effective_enh())
+        self._push_enh()
 
     def effective_enh(self) -> dict:
         p = dict(self.enh_params)
@@ -1129,6 +1594,15 @@ class MainWindow(QMainWindow):
 
     # --- presets ----------------------------------------------------------
     def settings(self) -> dict:
+        """The Base's settings: what presets, batches and the leave-photo question use."""
+        if self.active is None or self.base_settings is None:
+            return self._ui_settings()
+        s = copy.deepcopy(self.base_settings)
+        s["enhancement"]["red_eye"] = {"enabled": self.re_group.isChecked()}  # red eye is for the whole photo
+        return s
+
+    def _ui_settings(self) -> dict:
+        """What the tabs show now (the Base's or the active layer's settings)."""
         def stem(box: QComboBox):
             p = box.currentData()
             return p.stem if p is not None else None
@@ -1198,6 +1672,8 @@ class MainWindow(QMainWindow):
                     box.setCurrentIndex(i)
                     return
 
+        if self.active is not None and not self._switching:
+            self.set_active(None)  # presets and resets are for the Base
         self._applying = True
         try:
             dev = s.get("development", {})
@@ -1339,6 +1815,7 @@ class MainWindow(QMainWindow):
         if self.busy:
             self.worker.cancel = True
             self.pending = True
+        self._clear_layers()
         self.photo = photo
         self.photo_gen += 1
         self.g = g
@@ -1354,6 +1831,7 @@ class MainWindow(QMainWindow):
         kind = f"RAW, base exposure +{photo.baseline_ev:.2f} EV" if photo.meta.get("raw") else f"{photo.meta.get('bits')}-bit"
         self.setWindowTitle(f"Freeroom — {path.name} ({w}×{h}, {kind})")
         self.crop_btn.setEnabled(True)
+        self._layer_controls()
         self.redeye_btn.setChecked(False)
         self.redeye_found, self.redeye_kept = None, ()
         self.view.set_linear(photo.linear, photo.baseline_ev, self.g)
@@ -1371,6 +1849,38 @@ class MainWindow(QMainWindow):
         sh_key = (self.photo_gen, "sh", sh_model, dn_model) if sh_model is not None else None
         return dn_key, sh_key
 
+    @staticmethod
+    def _model_path(box: QComboBox, stem) -> Path | None:
+        for i in range(box.count()):
+            p = box.itemData(i)
+            if p is not None and p.stem == stem:
+                return p
+        return None
+
+    def _keys_of(self, s: dict) -> tuple[tuple | None, tuple | None]:
+        """Result keys stored settings need: (denoise, sharpen)."""
+        nr, sh = s["enhancement"]["noise_reduction"], s["enhancement"]["sharpening"]
+        dn_model = self._model_path(self.denoise_box, nr.get("model")) if nr.get("enabled") else None
+        sh_model = self._model_path(self.sharpen_box, sh.get("model")) if sh.get("enabled") else None
+        dn_key = (self.photo_gen, "dn", dn_model) if dn_model is not None else None
+        sh_key = (self.photo_gen, "sh", sh_model, dn_model) if sh_model is not None else None
+        return dn_key, sh_key
+
+    @staticmethod
+    def _enh_of(s: dict) -> dict:
+        """Enhancement blend parameters of stored settings (like effective_enh)."""
+        nr, sh = s["enhancement"]["noise_reduction"], s["enhancement"]["sharpening"]
+        on = bool(sh.get("enabled"))
+        return {"luminance": nr["luminance"], "color": nr["color"],
+                "ai_sharpen": sh["ai_sharpen"] if on else 0.0, "sharpen": sh["sharpen"] if on else 0.0}
+
+    def _all_settings(self) -> list[dict]:
+        """Settings of the Base, then of every layer (the tabs' for the one edited)."""
+        ui = self._ui_settings()
+        out = [ui if self.active is None or self.base_settings is None else self.base_settings]
+        out += [ui if i == self.active else L.settings for i, L in enumerate(self.layers)]
+        return out
+
     def _layer(self, key: tuple | None) -> np.ndarray | None:
         if key is None:
             return None
@@ -1382,8 +1892,10 @@ class MainWindow(QMainWindow):
         return None
 
     def _show_layers(self):
-        dn_key, sh_key = self._keys()
+        dn_key, sh_key = self._keys_of(self._all_settings()[0])
         self.view.set_layers(self._layer(dn_key), self._layer(sh_key))
+        if self.layers:
+            self._push_stack()
 
     def stop_enhancement(self):
         """Cancel button: untick the sections whose AI step isn't done (sharpening
@@ -1396,12 +1908,12 @@ class MainWindow(QMainWindow):
                 group.setChecked(False)
 
     def update_pipeline(self):
-        """Run the AI steps the ticked sections need that haven't run yet for
-        this photo, then save if a save is waiting."""
+        """Run the AI steps the ticked sections of the Base and every layer need
+        that haven't run yet for this photo, then save if a save is waiting."""
         if self.photo is None or self.denoise_box.count() == 0:
             return
-        dn_key, sh_key = self._keys()
-        wanted = frozenset(k for k in (dn_key, sh_key) if k is not None)
+        pairs = [self._keys_of(st) for st in self._all_settings()]
+        wanted = frozenset(k for pair in pairs for k in pair if k is not None)
         if self.busy:
             # Steps that were switched off (or got another model) stop after their
             # current tile; the rest of the job goes on and its results are kept.
@@ -1410,19 +1922,22 @@ class MainWindow(QMainWindow):
         if self.busy:
             self.pending = True  # come back here when the job ends
             return
-        stages = []
-        if dn_key is not None and dn_key not in self.results or sh_key is not None and sh_key not in self.results:
-            if self.enc_orig is None:
-                self.enc_orig = pipeline.encode(self.photo.linear, self.g)
-        if dn_key is not None and dn_key not in self.results:
-            dst = self.enc_orig.copy()  # shows the unprocessed photo until tiles land
-            self.running[dn_key] = dst
-            stages.append((dn_key, "Denoising", dn_key[2], self.enc_orig, dst))
-        if sh_key is not None and sh_key not in self.results:
-            src = self.enc_orig if dn_key is None else self.results.get(dn_key, self.running.get(dn_key))
-            dst = np.empty_like(src)  # filled by the worker once that stage starts
-            self.running[sh_key] = dst
-            stages.append((sh_key, "Sharpening", sh_key[2], src, dst))
+        stages, seen = [], set()
+        if any(k not in self.results for k in wanted) and self.enc_orig is None:
+            self.enc_orig = pipeline.encode(self.photo.linear, self.g)
+        for dn_key, _ in pairs:
+            if dn_key is not None and dn_key not in self.results and dn_key not in seen:
+                seen.add(dn_key)
+                dst = self.enc_orig.copy()  # shows the unprocessed photo until tiles land
+                self.running[dn_key] = dst
+                stages.append((dn_key, "Denoising", dn_key[2], self.enc_orig, dst))
+        for dn_key, sh_key in pairs:
+            if sh_key is not None and sh_key not in self.results and sh_key not in seen:
+                seen.add(sh_key)
+                src = self.enc_orig if dn_key is None else self.results.get(dn_key, self.running.get(dn_key))
+                dst = np.empty_like(src)  # filled by the worker once that stage starts
+                self.running[sh_key] = dst
+                stages.append((sh_key, "Sharpening", sh_key[2], src, dst))
 
         if not stages:
             if self.save_target is not None:
@@ -1552,7 +2067,8 @@ class MainWindow(QMainWindow):
         """Hand the full-size develop + write to the saver thread, with the
         settings as they are now (changing sliders meanwhile doesn't affect it)."""
         out, self.save_target = self.save_target, None
-        dn_key, sh_key = self._keys()
+        base = self._all_settings()[0]
+        dn_key, sh_key = self._keys_of(base)
         options = self.save_options
         self.saving = True
         self.save_btn.setEnabled(False)
@@ -1560,7 +2076,8 @@ class MainWindow(QMainWindow):
         self.start_save.emit({
             "photo": self.photo, "out": out, "g": self.g, "options": options,
             "dn": self.results.get(dn_key), "sharp": self.results.get(sh_key),
-            "dev": dict(self.dev_params), "enh": self.effective_enh(), "crop": self.view.crop,
+            "dev": dict(base["development"]), "enh": self._enh_of(base), "crop": self.view.crop,
+            "layers": self._stack(finished_only=True),
             "spots": None if self.re_group.isChecked() and self.redeye_found is None else self.view.spots,
         })
 
@@ -1596,6 +2113,8 @@ class MainWindow(QMainWindow):
         self.thread.wait(5000)
         self.load_thread.quit()
         self.load_thread.wait(5000)
+        self.seg_thread.quit()
+        self.seg_thread.wait(5000)
         self.view.shutdown()
         self.library.shutdown()
         super().closeEvent(e)

@@ -68,6 +68,30 @@ whole photo; pick an aspect ratio (Free, Original, 1:1, 3:2, 4:3, 5:4, 16:9;
 loupe, histogram and saved file then show only the cropped part. The crop is
 kept per photo and isn't part of presets.
 
+**Layers** (folded above the tabs; click the header to open): **New layer** adds a layer that starts as a
+copy of the Base (the whole photo) and applies only inside its selection.
+While a layer is picked in the list, the Raw, B&W and Enhancement tabs edit
+that layer: its own exposure, colour, HDR, B&W and noise reduction /
+sharpening (the AI models still run once per photo, also when only a layer
+uses them). Pick **Base** to edit the whole photo again. Selecting is done by
+AI (SAM 2.1, on the GPU; it reads the photo once, about half a second, then
+answers each click in a fraction of a second):
+- **Magic select**: click an object and it's selected; click more of it to
+  grow the selection, right-click (or Ctrl+click) what doesn't belong.
+- **Brush**: paint what belongs (left button) and what doesn't (right, or
+  left with Ctrl held); the
+  painted pixels are kept or removed as painted, and the AI follows the
+  strokes to find the rest of the object. Scroll sets the brush size.
+- **Copy** duplicates the picked layer (selection and settings) just above
+  it, to build on or try a variation.
+- **Undo** (Ctrl+Z) / **Clear**, **Invert**, **Feather** (soft edge),
+  **Opacity**, **Show selection** (red tint), and the tick in the list hides a
+  layer. Enter or Esc leaves a tool. Hover a layer in the list to see its
+  area on the photo.
+
+Layers belong to the photo: they're in the saved file, but not in presets or
+batches, and opening another photo drops them. Presets are always the Base's.
+
 **Batch…** (top bar): process a whole folder with a preset (or the current
 settings): pick the input and output folder, the format (JPEG, 16-bit TIFF or
 PNG) and an optional name suffix; subfolders can be included (their structure
@@ -201,6 +225,7 @@ they're instant.
 Models (`setup/download-models.sh`):
 - `models/denoise/`: SCUNet real psnr (default, faithful), gan (crisper, may invent texture)
 - `models/sharpen/`: Restormer defocus deblurring (soft focus/lens) and motion deblurring (shake)
+- `models/segment/`: SAM 2.1 small, the AI selection for layers (184 MB)
 
 Any 1x RGB model spandrel (+ extra arches) can load can be dropped into either folder.
 
@@ -245,6 +270,12 @@ releases, not part of this repo):
   model from [opencv/opencv_zoo](https://github.com/opencv/opencv_zoo). The
   model is bundled in `freeroom/data/` under its MIT license
   (`freeroom/data/YUNET_LICENSE.txt`).
+- **SAM 2.1** (Segment Anything 2) selection for layers: Nikhila Ravi and the
+  SAM 2 team at Meta FAIR, *SAM 2: Segment Anything in Images and Videos*.
+  [facebookresearch/sam2](https://github.com/facebookresearch/sam2)
+  (Apache-2.0); weights from
+  [facebook/sam2.1-hiera-small](https://huggingface.co/facebook/sam2.1-hiera-small),
+  run through Hugging Face transformers.
 
 Libraries (installed by `setup/install.sh`, each under its own license):
 - [spandrel](https://github.com/chaiNNer-org/spandrel) and
@@ -252,6 +283,7 @@ Libraries (installed by `setup/install.sh`, each under its own license):
   The extra arches package holds architectures whose licences may be
   restrictive; check them before any commercial use.
 - [PyTorch](https://pytorch.org) (BSD-3-Clause)
+- [transformers](https://github.com/huggingface/transformers) by Hugging Face (Apache-2.0): runs SAM 2.1
 - [Qt](https://www.qt.io) through [PySide6](https://doc.qt.io/qtforpython/) (LGPLv3)
 - [LibRaw](https://www.libraw.org) (LGPL-2.1 or CDDL-1.0) through
   [rawpy](https://github.com/letmaik/rawpy) (MIT): RAW decoding

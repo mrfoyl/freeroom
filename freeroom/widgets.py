@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QThread, Signal
 from PySide6.QtGui import QColor, QCursor, QImage, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QLabel, QProgressBar, QSlider, QVBoxLayout, QWidget
 
-from . import develop, pipeline, redeye
+from . import develop, layers, pipeline, redeye
 
 
 def to_qimage(rgb: np.ndarray, dpr: float = 1.0) -> QImage:
@@ -66,6 +66,9 @@ class PhotoView(QWidget):
     redeye_clicked = Signal(float, float, float)  # photo x, y, search radius
     spots_changed = Signal()
     redeye_finished = Signal()
+    mask_clicked = Signal(float, float, bool)  # photo x, y, True = part of it (left) / not (right)
+    mask_stroked = Signal(object, float, bool)  # photo points, brush radius (photo px), True = keep
+    mask_finished = Signal()
     _request = Signal(object)
 
     HANDLE = 9  # px: grab distance of the crop handles
@@ -105,6 +108,16 @@ class PhotoView(QWidget):
         self.redeye_mode = False
         self.redeye_r = 60.0  # search radius in photo px, set per photo
         self.redeye_note = ""  # result of the last click, shown in the banner
+        # layers above the base: dicts with mask, dev, enh, dn, sharp (see set_stack)
+        self.stack: list[dict] = []
+        self.mask_tool: str | None = None  # "magic" or "brush" while selecting
+        self.mask_show: np.ndarray | None = None  # mask shown as a red overlay
+        self.brush_r = 40.0  # photo px
+        self._stroke: list[tuple[float, float]] | None = None
+        self._stroke_keep = True
+        self._ctrl = False  # Ctrl held: the mask tools subtract
+        self._overlay: tuple | None = None  # (key, QImage)
+        self.mask_note = ""
         # Loading overlay in the middle of the view (busy bar: decoders don't report progress)
         self._loading = QWidget(self)
         self._loading_text = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
@@ -171,8 +184,38 @@ class PhotoView(QWidget):
         self.spots_changed.emit()
         h, w, _ = linear.shape
         self.redeye_r = max(12.0, max(h, w) / 70)
+        self.brush_r = max(8.0, max(h, w) / 80)
+        self.stack = []
+        self.mask_show = None
         self._small = {}
         self._rebuild_small()
+
+    # --- layers -----------------------------------------------------------
+    def set_stack(self, stack: list[dict]):
+        """Layers above the base, bottom first: {"mask": float32 at work size,
+        "dev": params, "enh": params, "dn": array or None, "sharp": array or None}."""
+        for d in stack:
+            d.setdefault("lut", develop.build_lut(d["dev"]))
+        self.stack = stack
+        for k in [k for k in self._small if k.startswith("ai")]:
+            del self._small[k]
+        self._rebuild_small()
+
+    def set_mask_tool(self, tool: str | None):
+        self.mask_tool = tool
+        self._stroke = None
+        self.mask_note = ""
+        self.setCursor(Qt.CursorShape.CrossCursor if tool else Qt.CursorShape.ArrowCursor)
+        self.update()
+
+    def set_mask_show(self, mask: np.ndarray | None):
+        self.mask_show = mask
+        self._overlay = None
+        self.update()
+
+    def set_mask_note(self, text: str):
+        self.mask_note = text
+        self.update()
 
     # --- red eye ----------------------------------------------------------
     def set_redeye_mode(self, on: bool):
@@ -332,8 +375,8 @@ class PhotoView(QWidget):
 
     def ai_updated(self):
         """The AI layers changed (or the worker filled in more tiles)."""
-        self._small.pop("dn", None)
-        self._small.pop("sharp", None)
+        for k in [k for k in self._small if k in ("dn", "sharp") or k.startswith("ai")]:
+            del self._small[k]
         self._rebuild_small()
 
     def _target_rect(self) -> QRectF:
@@ -361,18 +404,24 @@ class PhotoView(QWidget):
         small("linear", self.linear)
         small("dn", self.dn)
         small("sharp", self.sharp)
+        for d in self.stack:
+            for arr in (d.get("dn"), d.get("sharp")):
+                if arr is not None:
+                    small(f"ai{id(arr)}", arr)
         self._render_view()
 
-    def _base(self, out_shape, region) -> np.ndarray | None:
+    def _base(self, out_shape, region, params: dict | None = None) -> np.ndarray | None:
         """HDR base layer for a region of the full photo (None = all of it)."""
-        if not self.dev_params.get("hdr"):
+        if not (params or self.dev_params).get("hdr"):
             return None
         if self._hdr_map is None:
             self._hdr_map = develop.hdr_map(self.linear)
         return develop.hdr_base(self._hdr_map, self.linear.shape, out_shape, region)
 
-    def _render(self, lin, dn, sharp, original: bool, region: tuple | None = None) -> np.ndarray:
-        """Render one region (proxy, or loupe crop at `region` = y0, x0, y1, x1) in the current mode."""
+    def _render(self, lin, dn, sharp, original: bool, region: tuple | None = None,
+                pick=None, stack: list | None = None) -> np.ndarray:
+        """Render one region (proxy, or loupe crop at `region` = y0, x0, y1, x1) in the current mode.
+        pick(array) gives a layer's AI array for these pixels; stack = layers above the base."""
         if self.mode == "develop" and original:
             return develop.develop(lin, develop.DEFAULTS, self.baseline_ev, self._default_lut)
         base = self._base(lin.shape, region)
@@ -381,11 +430,22 @@ class PhotoView(QWidget):
         def fix(x):
             return redeye.apply(x, spots, region)
 
-        if not original:
-            return pipeline.compose(
-                lin, dn, sharp, self.g, self.dev_params, self.baseline_ev, self.enh_params, self._lut, base, fix=fix
-            )
-        return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut, base)
+        if original:
+            return develop.develop(lin, self.dev_params, self.baseline_ev, self._lut, base)
+        out = pipeline.compose(
+            lin, dn, sharp, self.g, self.dev_params, self.baseline_ev, self.enh_params, self._lut, base, fix=fix
+        )
+        h, w = self.linear.shape[:2]
+        for d in self.stack if stack is None else stack:
+            m = layers.region_mask(d["mask"], (h, w), region or (0, 0, h, w), lin.shape[:2])
+            if float(m.max()) <= 1e-3:
+                continue
+            ldn = None if d.get("dn") is None or pick is None else pick(d["dn"])
+            lsh = None if d.get("sharp") is None or pick is None else pick(d["sharp"])
+            above = pipeline.compose(lin, ldn, lsh, self.g, d["dev"], self.baseline_ev, d["enh"], d["lut"],
+                                     self._base(lin.shape, region, d["dev"]), fix=fix)
+            out = layers.blend(out, above, m)
+        return out
 
     def _render_view(self):
         """Ask for the view to be re-rendered (in the background, newest state wins)."""
@@ -401,8 +461,10 @@ class PhotoView(QWidget):
         sm = dict(self._small)
         lin, dn, sharp = sm["linear"], sm.get("dn"), sm.get("sharp")
         x0, y0, x1, y1 = sm["region"]
+        stack = [dict(d) for d in self.stack]  # this render keeps its own
         bw = (lin, dict(self.dev_params), self.baseline_ev) if self.mode == "develop" else None
-        self._request.emit((lambda: self._render(lin, dn, sharp, False, (y0, x0, y1, x1)),
+        self._request.emit((lambda: self._render(lin, dn, sharp, False, (y0, x0, y1, x1),
+                                                 lambda a: sm.get(f"ai{id(a)}"), stack),
                             self.devicePixelRatioF(), bw))
 
     def _render_done(self, img: QImage, out: np.ndarray, hist, beyond_white: float):
@@ -439,6 +501,11 @@ class PhotoView(QWidget):
         if self.crop_mode:
             self._paint_crop(p)
             return
+        if self.mask_show is not None:
+            self._paint_mask(p)
+        if self.mask_tool:
+            self._paint_mask_tool(p)
+            return
         if self.redeye_mode:
             self._paint_spots(p)
             self._paint_banner(p)
@@ -450,10 +517,62 @@ class PhotoView(QWidget):
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawEllipse(self.mouse, r, r)
 
-    def _paint_banner(self, p: QPainter):
-        lines = "Click near a red pupil (the other eye is found with it)  ·  Scroll: search size  ·  Right-click: remove a fix  ·  Enter: done"
-        if self.redeye_note:
-            lines += "\n" + self.redeye_note
+    def _paint_mask(self, p: QPainter):
+        """The selection as a red tint (cached per mask, size and region)."""
+        dpr = self.devicePixelRatioF()
+        w, h = max(1, round(self._rect.width() * dpr)), max(1, round(self._rect.height() * dpr))
+        x0, y0, x1, y1 = self._region()
+        key = (id(self.mask_show), w, h, (x0, y0, x1, y1))
+        if self._overlay is None or self._overlay[0] != key:
+            m = layers.region_mask(self.mask_show, self.linear.shape[:2], (y0, x0, y1, x1), (h, w))
+            rgba = np.zeros((h, w, 4), np.uint8)
+            rgba[..., 0], rgba[..., 1], rgba[..., 2] = 255, 50, 50
+            rgba[..., 3] = (np.clip(m, 0, 1) * 150).astype(np.uint8)
+            img = QImage(rgba.data, w, h, 4 * w, QImage.Format.Format_RGBA8888).copy()
+            img.setDevicePixelRatio(dpr)
+            self._overlay = (key, img)
+        p.drawImage(self._rect.topLeft(), self._overlay[1])
+
+    def _paint_mask_tool(self, p: QPainter):
+        if self.mask_tool == "magic":
+            text = ("Magic select: click an object to select it, click more of it to grow the selection  ·  "
+                    "Right-click or Ctrl+click: not this  ·  Ctrl+Z: undo  ·  Enter: done")
+        else:
+            text = ("Foreground / background brush: paint what belongs (left) and what doesn't (right or Ctrl); "
+                    "the AI follows your strokes  ·  Scroll: brush size  ·  Ctrl+Z: undo  ·  Enter: done")
+        self._paint_banner(p, text + (("\n" + self.mask_note) if self.mask_note else ""))
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        k = self._rect.width() / (self._region()[2] - self._region()[0])
+        if self._stroke and len(self._stroke) > 0:
+            path = QPainterPath(self._to_widget(*self._stroke[0]))
+            for pt in self._stroke[1:]:
+                path.lineTo(self._to_widget(*pt))
+            colour = QColor(90, 230, 120, 150) if self._stroke_keep else QColor(240, 80, 80, 150)
+            pen = QPen(colour, max(2.0, 2 * self.brush_r * k))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawPath(path)
+        if self.mouse is not None and self._rect.contains(self.mouse):
+            sub = self._ctrl and self._stroke is None or (self._stroke is not None and not self._stroke_keep)
+            colour = QColor(255, 90, 90, 235) if sub else QColor(255, 255, 255, 220)
+            p.setPen(QPen(colour, 1.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            if self.mask_tool == "brush":
+                r = max(2.0, self.brush_r * k)
+                p.drawEllipse(self.mouse, r, r)
+            else:
+                c = self.mouse + QPointF(14, 14)  # + adds, − subtracts
+                p.drawLine(c - QPointF(5, 0), c + QPointF(5, 0))
+                if not sub:
+                    p.drawLine(c - QPointF(0, 5), c + QPointF(0, 5))
+
+    def _paint_banner(self, p: QPainter, lines: str | None = None):
+        if lines is None:
+            lines = "Click near a red pupil (the other eye is found with it)  ·  Scroll: search size  ·  Right-click: remove a fix  ·  Enter: done"
+            if self.redeye_note:
+                lines += "\n" + self.redeye_note
         box = p.fontMetrics().boundingRect(self.rect().adjusted(20, 0, -20, 0), Qt.TextFlag.TextWordWrap, lines)
         box = QRectF(box).adjusted(-12, -6, 12, 6)
         box.moveTo((self.width() - box.width()) / 2, 10)
@@ -513,6 +632,7 @@ class PhotoView(QWidget):
             None if self.sharp is None else self.sharp[region],
             original,
             (ey0, ex0, ey1, ex1),
+            lambda a: a[region],
         )
         crop = crop[iy0 - ey0 : iy1 - ey0, ix0 - ex0 : ix1 - ex0]
         if crop.size == 0:
@@ -549,6 +669,9 @@ class PhotoView(QWidget):
 
     def mouseMoveEvent(self, e):
         self.mouse = e.position()
+        self._ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if self.mask_tool and self._stroke is not None:
+            self._stroke.append(self._to_photo(self.mouse))
         if self.crop_mode and self.linear is not None:
             if self._drag:
                 self._drag_crop(self.mouse)
@@ -567,6 +690,17 @@ class PhotoView(QWidget):
                 kind = self._hit(e.position()) or "new"
                 self._drag = (kind, self._to_photo(e.position()), self._crop_box())
             return
+        if self.mask_tool and self.linear is not None:
+            if self._rect.contains(e.position()) and e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+                self._ctrl = bool(e.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                keep = e.button() == Qt.MouseButton.LeftButton and not self._ctrl  # Ctrl: subtract
+                x, y = self._to_photo(e.position())
+                if self.mask_tool == "magic":
+                    self.mask_clicked.emit(x, y, keep)
+                else:
+                    self._stroke, self._stroke_keep = [(x, y)], keep
+                    self.update()
+            return
         if self.redeye_mode and self.linear is not None:
             if self._rect.contains(e.position()):
                 x, y = self._to_photo(e.position())
@@ -579,6 +713,12 @@ class PhotoView(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, e):
+        if self.mask_tool:
+            if self._stroke:
+                pts, self._stroke = self._stroke, None
+                self.mask_stroked.emit(pts, self.brush_r, self._stroke_keep)
+            self.update()
+            return
         if self.crop_mode:
             self._drag = None
             return
@@ -586,6 +726,11 @@ class PhotoView(QWidget):
         self.update()
 
     def wheelEvent(self, e):
+        if self.mask_tool == "brush":  # brush size
+            factor = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
+            self.brush_r = float(np.clip(self.brush_r * factor, 2.0, 2000.0))
+            self.update()
+            return
         if self.redeye_mode:  # size of the search area instead of the loupe
             factor = 1.15 if e.angleDelta().y() > 0 else 1 / 1.15
             self.redeye_r = float(np.clip(self.redeye_r * factor, 6.0, 1000.0))
@@ -600,6 +745,11 @@ class PhotoView(QWidget):
             self.crop_finished.emit(e.key() != Qt.Key.Key_Escape)
         elif self.redeye_mode and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
             self.redeye_finished.emit()
+        elif self.mask_tool and e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Escape):
+            self.mask_finished.emit()
+        elif self.mask_tool and e.key() == Qt.Key.Key_Control:
+            self._ctrl = True
+            self.update()
         elif e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
             self.show_orig_all = True
             self.update()
@@ -607,6 +757,9 @@ class PhotoView(QWidget):
             super().keyPressEvent(e)
 
     def keyReleaseEvent(self, e):
+        if e.key() == Qt.Key.Key_Control:
+            self._ctrl = False
+            self.update()
         if e.key() == Qt.Key.Key_Space and not e.isAutoRepeat():
             self.show_orig_all = False
             self.update()
