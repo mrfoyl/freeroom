@@ -161,7 +161,7 @@ def wait(cond=lambda: False, limit=120):
     for _ in range(5): qapp.processEvents()
 win.open_path(src); wait(lambda: win.photo is not None and not win.loading); wait(lambda: win.view._view_img is not None, 5)
 v = win.view
-win.tabs.setCurrentWidget(win.enh_tab); win.run_enhancement(); wait(lambda: not win.busy and win.results, 120); keep = dict(win.results)
+win.tabs.setCurrentWidget(win.enh_tab); win.nr_group.setChecked(True); wait(lambda: not win.busy and win.results, 120); keep = dict(win.results)
 def click(x, y, button=Qt.MouseButton.LeftButton):
     pt = v._to_widget(x, y); QTest.mouseMove(v, QPoint(round(pt.x()), round(pt.y()))); QTest.mouseClick(v, button, pos=QPoint(round(pt.x()), round(pt.y()))); wait(limit=0.2)
 def shown_at(x, y):

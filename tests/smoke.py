@@ -83,24 +83,24 @@ print("dev tab, AI not run:", not win.results and not win.busy)
 win.view.mouse = QPointF(win.view.width() * 0.45, win.view.height() * 0.5); win.view.update(); qapp.processEvents()
 win.grab().save(str(out_dir / "gui_develop.png"))
 
-win.tabs.setCurrentWidget(win.enh_tab); print("enhance tab, nothing started:", not win.busy and not win.results)
-win.run_enhancement(); print("Run enhancement:", wait(), win.status.text())
-win.sh_group.setChecked(True); win.run_enhancement(); print("+sharpen:", wait())
+win.tabs.setCurrentWidget(win.enh_tab); print("enhance tab, nothing ticked or started:", not win.nr_group.isChecked() and not win.busy and not win.results)
+win.nr_group.setChecked(True); print("tick NR -> runs:", win.busy, wait(), win.status.text())
+win.sh_group.setChecked(True); print("+sharpen:", win.busy, wait())
 win.grab().save(str(out_dir / "gui_enhance.png"))
 win.tabs.setCurrentIndex(0); win.tabs.setCurrentWidget(win.enh_tab); print("back to enhance, no change:", wait(), "busy:", win.busy)
 win.tabs.setCurrentIndex(0); win.sliders["midtones"][0].setValue(20); win.sliders["exposure"][0].setValue(-40)
 win.tabs.setCurrentWidget(win.enh_tab)
 print("dev changed -> AI reused (busy must be False):", win.busy, wait())
-win.denoise_box.setCurrentIndex(1); win.run_enhancement(); print("other denoise model -> runs once:", win.busy, wait())
+win.denoise_box.setCurrentIndex(1); print("other denoise model -> runs once:", win.busy, wait())
 win.denoise_box.setCurrentIndex(0); print("first model again -> cached (busy False):", win.busy, wait())
-win.nr_group.setChecked(False); win.run_enhancement(); print("NR off -> sharpen on original runs once:", win.busy, wait())
+win.nr_group.setChecked(False); print("NR off -> sharpen on original runs once:", win.busy, wait())
 win.nr_group.setChecked(True); print("NR on again -> cached:", win.busy, wait(), "results:", len(win.results))
 # development applied on top of cached AI: the view must match a full recompute
 from freeroom import pipeline as pl
 sm = win.view._small
 ref = pl.compose(sm["linear"], sm.get("dn"), sm.get("sharp"), win.g, win.dev_params, win.photo.baseline_ev, win.effective_enh())
 print("view == compose with current dials:", ref.shape, sm.get("dn") is not None and sm.get("sharp") is not None)
-gen = win.photo_gen; win.open_path(raw_path or src); wait(lambda: not win.loading); print("reopen photo -> not started by itself:", not win.busy); win.run_enhancement(); print("reopen photo -> AI runs again:", win.busy, wait(), "old results dropped:", all(k[0] != gen for k in win.results))
+gen = win.photo_gen; win.open_path(raw_path or src); wait(lambda: not win.loading); win.nr_group.setChecked(True); print("reopen photo, tick NR -> AI runs again:", win.busy, wait(), "old results dropped:", all(k[0] != gen for k in win.results))
 
 # presets
 win.preset_box.setCurrentIndex(0)

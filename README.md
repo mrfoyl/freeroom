@@ -22,7 +22,8 @@ Three tabs, applied in this order:
    that colour lighter/darker, with **High** / **Low** underneath doing the
    same only in its bright / dark parts. Greys are never changed.
 3. **Enhancement**: the AI steps below, shown on top of the development.
-   Each section can be switched off. The enhancements stay on when you go
+   Every section starts unticked: tick it to run it, untick it to stop it.
+   The enhancements stay on when you go
    back to the Raw tab, so you develop the finished photo.
    **Red eye** (off by default) finds red eyes by itself when switched on. It
    looks for faces first, then for red pupils where they have their eyes; for
@@ -76,19 +77,19 @@ preset's AI steps (once each) and its development, exactly like saving it by
 hand; crops are per photo, so batches don't crop. Cancel stops after the
 current AI tile; a photo that fails is logged and the batch goes on.
 
-Each AI model runs **at most once per photo**, and only when you press
-**Run enhancement** on the Enhancement tab, or on save. Opening the tab starts
-nothing. The models work on a fixed encoding of the
+Each AI model runs **at most once per photo**: ticking **Noise reduction** or
+**Sharpening** starts its AI step right away, and nothing runs while they're
+unticked (both are by default). The models work on a fixed encoding of the
 linear photo, not on the developed one, so their results are kept and the
 dials are applied on top afterwards: changing development, switching tabs,
 toggling sections or going back to a model you already tried is instant.
 Only a new photo (or a model not yet tried on this one) needs the AI again.
-Switching a section off (or picking another model) while its AI step is still
-running stops that step after the current tile; finished results are kept.
-**Cancel** (next to the progress bar) stops a run after the current tile;
-press Run enhancement to start it again. Saving while a run is going asks
-whether to **save now** (the run is cancelled and the photo is saved with the
-AI steps that have finished) or **wait** and save when the run is done.
+Unticking a section (or picking another model) while its AI step is still
+running stops it at once (within the current tile, a fraction of a second);
+finished results are kept. **Cancel** (next to the progress bar) does the same
+by unticking the running sections. Saving while a step runs asks whether to
+**save now** (with the steps that have finished; the running one goes on) or
+**wait** and save when it's done.
 
 The RGB range view (histogram) above the tabs shows the current result, with
 clip markers and a note when a RAW has highlight data past white.

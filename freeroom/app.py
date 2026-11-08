@@ -510,8 +510,6 @@ class MainWindow(QMainWindow):
         self.busy = False
         self.pending = False
         self.cancelled = False  # the user stopped the running job: don't restart it by itself
-        self.enh_requested = False  # Run enhancement pressed: the AI steps only start then, or on save
-        self.quiet_cancel = False  # cancelled to save now: the save's status stays
         self.save_target: Path | None = None
         self.save_options: dict = {}  # imageio.save options of the format picked in the save dialog
         self._applying = False  # loading a preset: hold back pipeline runs
@@ -568,8 +566,8 @@ class MainWindow(QMainWindow):
         self.progress.setTextVisible(True)
         self.progress.hide()
         self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setToolTip("Stop the AI denoise / sharpen run (after the current tile)")
-        self.cancel_btn.clicked.connect(self.cancel_job)
+        self.cancel_btn.setToolTip("Stop the AI step that's running and untick its section")
+        self.cancel_btn.clicked.connect(self.stop_enhancement)
         self.cancel_btn.hide()
         self.load_req = 0  # id of the latest open request; older results are dropped
         self.load_text: str | None = None  # overlay text while a photo is loading
@@ -906,7 +904,7 @@ class MainWindow(QMainWindow):
         self.denoise_box.currentIndexChanged.connect(lambda _: self.enh_settings_changed())
         self.nr_group = QGroupBox("Noise reduction")
         self.nr_group.setCheckable(True)
-        self.nr_group.setChecked(True)
+        self.nr_group.setChecked(False)  # ticking a section starts its AI step
         self.nr_group.toggled.connect(lambda _: self.enh_settings_changed())
         form = QFormLayout(self.nr_group)
         form.addRow("AI model", self.denoise_box)
@@ -929,15 +927,10 @@ class MainWindow(QMainWindow):
 
         self.re_group = self._build_redeye_group()
 
-        self.run_btn = QPushButton("Run enhancement")
-        self.run_btn.setToolTip("Run the AI steps these settings need (each model runs once per photo)")
-        self.run_btn.clicked.connect(self.run_enhancement)
-        self.run_btn.setEnabled(False)
-
         reset = QPushButton("Reset enhancement sliders")
         reset.clicked.connect(lambda: self._reset(ENH_KEYS))
         note = QLabel(
-            "The AI steps only run when you press <i>Run enhancement</i> (or save). "
+            "Ticking a section starts its AI step; unticking it stops a step that isn't done. "
             "Each AI model runs once per photo; development and these sliders "
             "are applied on top instantly. <i>Defocus</i> = soft / slightly out of focus, "
             "<i>Motion</i> = camera shake."
@@ -946,7 +939,6 @@ class MainWindow(QMainWindow):
         note.setWordWrap(True)
         tab = QWidget()
         lay = QVBoxLayout(tab)
-        lay.addWidget(self.run_btn)
         lay.addWidget(self.nr_group)
         lay.addWidget(self.sh_group)
         lay.addWidget(self.re_group)
@@ -1171,7 +1163,7 @@ class MainWindow(QMainWindow):
         return {
             "development": dict(develop.DEFAULTS),
             "enhancement": {
-                "noise_reduction": {"enabled": True, "model": first(self.denoise_box),
+                "noise_reduction": {"enabled": False, "model": first(self.denoise_box),
                                     "luminance": d["luminance"] / 100, "color": d["color"] / 100},
                 "sharpening": {"enabled": False, "model": first(self.sharpen_box),
                                "ai_sharpen": d["ai_sharpen"] / 100, "sharpen": d["sharpen"] / 100},
@@ -1357,7 +1349,6 @@ class MainWindow(QMainWindow):
         self.running.clear()
         self.started.clear()
         self.save_target = None
-        self.enh_requested = False
         self.save_btn.setEnabled(True)
         h, w, _ = photo.linear.shape
         kind = f"RAW, base exposure +{photo.baseline_ev:.2f} EV" if photo.meta.get("raw") else f"{photo.meta.get('bits')}-bit"
@@ -1394,25 +1385,19 @@ class MainWindow(QMainWindow):
         dn_key, sh_key = self._keys()
         self.view.set_layers(self._layer(dn_key), self._layer(sh_key))
 
-    def _missing(self) -> bool:
-        """The current settings need an AI step that hasn't run on this photo."""
-        return self.photo is not None and any(k is not None and k not in self.results for k in self._keys())
-
-    def _update_run_btn(self):
-        if self.busy:
-            self.run_btn.setText("Running enhancement…")
-        else:
-            self.run_btn.setText("Run enhancement" if self._missing() else "Enhancement up to date")
-        self.run_btn.setEnabled(not self.busy and self._missing())
-
-    def run_enhancement(self):
-        self.enh_requested = True
-        self.update_pipeline()
+    def stop_enhancement(self):
+        """Cancel button: untick the sections whose AI step isn't done (sharpening
+        first, as unticking noise reduction would make it start over), which stops
+        them; a save waiting for them is dropped."""
+        self.save_target = None
+        for group, which in ((self.sh_group, 1), (self.nr_group, 0)):
+            key = self._keys()[which]
+            if key is not None and key not in self.results:
+                group.setChecked(False)
 
     def update_pipeline(self):
-        """Run the AI steps the current settings need that haven't run yet for
-        this photo (only after Run enhancement or when a save waits), then save
-        if a save is waiting."""
+        """Run the AI steps the ticked sections need that haven't run yet for
+        this photo, then save if a save is waiting."""
         if self.photo is None or self.denoise_box.count() == 0:
             return
         dn_key, sh_key = self._keys()
@@ -1422,9 +1407,6 @@ class MainWindow(QMainWindow):
             # current tile; the rest of the job goes on and its results are kept.
             self.worker.wanted = wanted
         self._show_layers()  # the Raw tab shows the results there are, too
-        self._update_run_btn()
-        if not self.enh_requested and self.save_target is None:
-            return
         if self.busy:
             self.pending = True  # come back here when the job ends
             return
@@ -1442,7 +1424,6 @@ class MainWindow(QMainWindow):
             self.running[sh_key] = dst
             stages.append((sh_key, "Sharpening", sh_key[2], src, dst))
 
-        self.enh_requested = False
         if not stages:
             if self.save_target is not None:
                 self._do_save()
@@ -1457,7 +1438,6 @@ class MainWindow(QMainWindow):
         self.cancel_btn.show()
         self.refresh.start()
         self._show_layers()
-        self._update_run_btn()
         self.start_job.emit(stages)
 
     def on_stage(self, key: tuple):
@@ -1473,25 +1453,22 @@ class MainWindow(QMainWindow):
         while len(self.results) > MAX_RESULTS:
             self.results.popitem(last=False)
         self._show_layers()
-        self._update_run_btn()
 
     def on_progress(self, done: int, total: int):
         self.progress.setMaximum(total)
         self.progress.setValue(done)
         self.progress.setFormat(f"tile {done}/{total}")
 
-    def cancel_job(self, quiet: bool = False):
+    def cancel_job(self):
+        """Stop the whole run (a batch needs the GPU); sections stay ticked."""
         if not self.busy:
             return
         self.worker.cancel = True
         self.cancelled = True
-        self.quiet_cancel = quiet
         self.pending = False
-        self.enh_requested = False
         self.save_target = None  # a save waiting for this run is dropped too
         self.cancel_btn.setEnabled(False)
-        if not quiet:
-            self.status.setText("Cancelling after the current tile…")
+        self.status.setText("Cancelling after the current tile…")
 
     def _job_ended(self):
         self.busy = False
@@ -1500,7 +1477,6 @@ class MainWindow(QMainWindow):
         self.cancel_btn.hide()
         self.running.clear()
         self.started.clear()
-        self._update_run_btn()
 
     def on_finished(self, ok: bool, seconds: float):
         self._job_ended()
@@ -1510,10 +1486,8 @@ class MainWindow(QMainWindow):
             self.status.setText("Stopped: the AI step was switched off")
         asked_again, self.pending = self.pending, False
         self._show_layers()
-        quiet, self.quiet_cancel = self.quiet_cancel, False
         if self.cancelled and not ok and not asked_again:
-            if not quiet:
-                self.status.setText("Cancelled. Press Run enhancement to run it again.")
+            self.status.setText("Cancelled. Untick and tick a section to run it again.")
             return
         self.update_pipeline()
 
@@ -1535,8 +1509,8 @@ class MainWindow(QMainWindow):
             box.setWindowTitle("Enhancement running")
             box.setText("An enhancement is still running.")
             box.setInformativeText(
-                "Save now: the enhancement is cancelled and the photo is saved with the AI steps "
-                "that have finished.\nWait: the photo is saved when the enhancement is done."
+                "Save now: the photo is saved with the AI steps that have finished; the running "
+                "one goes on.\nWait: the photo is saved when the enhancement is done."
             )
             now_btn = box.addButton("Save now", QMessageBox.ButtonRole.AcceptRole)
             wait_btn = box.addButton("Wait, then save", QMessageBox.ButtonRole.AcceptRole)
@@ -1562,8 +1536,7 @@ class MainWindow(QMainWindow):
         if out.resolve() == self.photo.path.resolve():
             QMessageBox.warning(self, "Could not save", "Refusing to overwrite the original photo.")
             return
-        if save_now:  # with the AI steps that are done; the running one stops after its tile
-            self.cancel_job(quiet=True)
+        if save_now:  # with the AI steps that are done; the running one goes on
             self.save_target = out
             self._do_save()
             return

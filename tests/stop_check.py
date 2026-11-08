@@ -1,5 +1,5 @@
-"""Enhancements on the Raw tab, AI steps stopping when switched off mid-run, and
-saving while an enhancement runs.
+"""Ticking a section starts its AI step, unticking stops it mid-run; the Cancel
+button unticks; enhancements show on the Raw tab; saving while a step runs.
 
     python tests/stop_check.py
 
@@ -52,22 +52,38 @@ def started():  # the run is under way: at least one tile done
 win.open_path(src); wait(lambda: not win.loading)
 dn_models = [win.denoise_box.itemData(i) for i in range(win.denoise_box.count())]
 
-# 0. Opening the Enhancement tab starts nothing; Run enhancement does
+# 0. Sections start unticked and nothing runs
 win.tabs.setCurrentWidget(win.enh_tab)
 wait(lambda: False, 1)
-check("Enhancement tab alone starts nothing", not win.busy and not win.results and win.run_btn.isEnabled())
+check("sections unticked by default, nothing runs",
+      not win.nr_group.isChecked() and not win.sh_group.isChecked() and not win.busy and not win.results)
 
-# 1. Noise reduction switched off while it runs: the run stops, nothing is kept
-win.run_enhancement()
+# 1. Ticking noise reduction starts it; unticking mid-run stops it, nothing is kept
+win.nr_group.setChecked(True)
+check("ticking NR starts it", win.busy)
 wait(started, 60)
-check("denoise started", win.busy)
 win.nr_group.setChecked(False)
 t = wait()
-check("NR off mid-run stops it", not win.busy and t < 5, f"({t:.1f}s, {win.status.text()!r})")
+check("NR unticked mid-run stops it", not win.busy and t < 1, f"({t:.2f}s, {win.status.text()!r})")
 check("no denoise result kept", not any(k[1] == "dn" for k in win.results))
 
-# 2. Sharpening switched off while denoise runs: denoise finishes, sharpen never runs
-win.sh_group.setChecked(True); win.nr_group.setChecked(True); win.run_enhancement()
+# 1b. Sharpening (the slower model) unticked mid-run stops just as fast
+win.sh_group.setChecked(True)
+wait(started, 60)
+win.sh_group.setChecked(False)
+t = wait()
+check("sharpen unticked mid-run stops it", not win.busy and t < 1 and not win.results, f"({t:.2f}s)")
+
+# 1c. The Cancel button unticks the running section
+win.nr_group.setChecked(True)
+wait(started, 60)
+win.stop_enhancement()
+t = wait()
+check("Cancel unticks and stops", not win.nr_group.isChecked() and not win.busy and t < 1 and not win.results,
+      f"({t:.2f}s)")
+
+# 2. Sharpening unticked while denoise runs: denoise finishes, sharpen never runs
+win.nr_group.setChecked(True); win.sh_group.setChecked(True)
 wait(started, 60)
 win.sh_group.setChecked(False)
 wait()
@@ -77,13 +93,13 @@ check("sharpen off mid-denoise: denoise kept, no sharpen", kinds == ["dn"], str(
 # 3. Another model picked mid-run: the old run stops, the new model's result is kept
 if len(dn_models) > 1:
     win.photo_gen += 1; win.results.clear()  # same photo, forget results so it runs again
-    win.run_enhancement()
+    win.update_pipeline()
     wait(started, 60)
-    win.denoise_box.setCurrentIndex(1); win.run_enhancement()  # asked while busy: runs when the old one stops
+    win.denoise_box.setCurrentIndex(1)  # runs when the old one stops
     wait(); wait()
     models = [k[2] for k in win.results if k[1] == "dn"]
     check("model change mid-run: only the new model's result", models == [dn_models[1]], str([m.stem for m in models]))
-    win.denoise_box.setCurrentIndex(0); win.run_enhancement(); wait()
+    win.denoise_box.setCurrentIndex(0); wait()
 
 # 4. Raw tab keeps showing the enhancements
 win.sliders["exposure"][0].setValue(30)
@@ -101,17 +117,17 @@ check("Raw tab view is the enhanced photo", diff > 0.003, f"(mean diff vs develo
 before = v._render(sm["linear"], None, None, True, (y0, x0, y1, x1))
 ref = develop.develop(sm["linear"], develop.DEFAULTS, v.baseline_ev, v._default_lut)
 check("Raw tab 'before' is still the default development", np.allclose(before, ref))
-check("no AI run started from the Raw tab", not win.busy)
+check("nothing left running", not win.busy)
 win.grab().save(str(out_dir / "gui_raw_enhanced.png"))
 
-# 5. Saving while an enhancement runs asks: save now (cancels) or wait, then save
+# 5. Saving while an AI step runs asks: save now (the step goes on) or wait, then save
 from unittest import mock
 from PySide6.QtWidgets import QMessageBox
 
 
 def save_while_running(choice: str, name: str):
     win.photo_gen += 1; win.results.clear()  # forget results so it runs again
-    win.run_enhancement()
+    win.update_pipeline()
     wait(started, 60)
     f = out_dir / name; f.unlink(missing_ok=True)
     asked = []
@@ -127,9 +143,10 @@ def save_while_running(choice: str, name: str):
 
 f, asked = save_while_running("Save now", "stop_saved_now.jpg")
 check("save while running asks", bool(asked), str(asked))
-wait(lambda: f.exists() and not win.saving and not win.busy, 120)
-check("Save now: saved, enhancement cancelled", f.exists() and not any(k[1] == "dn" for k in win.results),
-      win.status.text())
+wait(lambda: f.exists() and not win.saving, 120)
+check("Save now: saved while the step goes on", f.exists() and win.nr_group.isChecked(), win.status.text())
+wait()
+check("Save now: the step still finished", any(k[1] == "dn" for k in win.results))
 f, asked = save_while_running("Wait, then save", "stop_saved_after.jpg")
 check("Wait: not saved while it runs", win.busy and not f.exists())
 wait(lambda: f.exists() and not win.saving, 300)
