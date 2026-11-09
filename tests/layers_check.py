@@ -217,6 +217,7 @@ with mock.patch.object(appmod.MainWindow, "_leave_photo", return_value=True):
 check("new photo drops layers", not win.layers and win.layer_list.count() == 1)
 
 import shutil; shutil.rmtree(presets.PRESET_DIR, ignore_errors=True)
+win._leave_photo = lambda: True  # quitting asks to keep the edits
 win.close()
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)

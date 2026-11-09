@@ -119,4 +119,5 @@ out_file = out_dir / "saved_from_dev_tab.jpg"; out_file.unlink(missing_ok=True)
 with mock.patch.object(appmod.QFileDialog, "getSaveFileName", return_value=(str(out_file), "")):
     win.save_dialog()
 print("save from dev tab:", wait(lambda: out_file.exists()), out_file.exists(), win.status.text())
+win._leave_photo = lambda: True  # quitting asks to keep the edits
 win.close()

@@ -1,5 +1,5 @@
 """Simple raw development: white balance, exposure, tone, contrast, saturation, plus
-HDR (local tone mapping) and black & white (colour mixer).
+HDR (local tone mapping), black & white (colour mixer) and a look (colour LUT).
 
 Works on scene-linear RGB (RAW files are loaded linear; JPEGs etc. are
 linearised on load) and outputs display sRGB in [0, 1]. Every step except HDR
@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+
+from . import looks
 
 LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 
@@ -33,6 +35,9 @@ DEFAULTS = {
     "hdr_detail": 0.3,
     # Black & white: per colour, brightness overall / in highlights / in shadows
     "bw": False,
+    # Look: a colour LUT (looks.py) after everything else; "" = none
+    "lut": "",
+    "lut_strength": 1.0,
 }
 
 # Colour mixer hues (degrees) for black & white
@@ -222,6 +227,14 @@ def develop(
         y = (out @ LUMA)[..., None]
         out = y + (out - y) * np.float32(1.0 + sat)
         np.clip(out, 0.0, 1.0, out=out)
+    name, strength = params.get("lut"), params.get("lut_strength", 1.0)
+    if name and strength > 0:
+        try:
+            lut = looks.get(name)
+        except Exception:
+            lut = None  # missing or broken file: shown in the app, refused by batches
+        if lut is not None:
+            out = looks.apply(out, lut, strength)
     return out
 
 

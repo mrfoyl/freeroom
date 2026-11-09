@@ -153,6 +153,7 @@ wait(lambda: f.exists() and not win.saving, 300)
 check("Wait: saved once the enhancement is done", f.exists() and any(k[1] == "dn" for k in win.results),
       win.status.text())
 
+win._leave_photo = lambda: True  # quitting asks to keep the edits
 win.close()
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)

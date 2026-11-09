@@ -13,7 +13,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import develop, engine, imageio, pipeline, redeye
+from . import develop, engine, imageio, looks, pipeline, redeye
 
 # name: (extension, imageio.save options). Sizes for a 26 MP RAW: JPEG ~18 MB,
 # JPEG XL 5-10 MB (16-bit, but not every program opens it), TIFF/PNG 16-bit
@@ -42,9 +42,12 @@ class Job:
 
 def job_from_settings(settings: dict, enh_defaults: dict) -> Job:
     """Preset / settings dict (MainWindow.settings() format) -> Job. Missing keys
-    get the defaults; a model that isn't installed raises ValueError."""
+    get the defaults; a model that isn't installed or a LUT that can't be read
+    raises ValueError."""
     dev = dict(develop.DEFAULTS)
     dev.update({k: v for k, v in settings.get("development", {}).items() if k in develop.DEFAULTS})
+    if dev["lut"] and (msg := looks.problem(dev["lut"])):
+        raise ValueError(msg)
     enh = dict(enh_defaults)
     sections = settings.get("enhancement", {})
     nr = sections.get("noise_reduction", {})

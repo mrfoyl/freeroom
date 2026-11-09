@@ -1,13 +1,15 @@
 """Freeroom GUI: open a photo, develop it, enhance it with AI, save.
 
 Raw tab: instant, per-pixel dials on the linear photo, then an optional HDR
-section (local tone mapping).
+section (local tone mapping) and a look (colour LUT, see looks.py).
 B&W tab: more development, applied after the Raw tab.
 Enhancement tab: AI denoise + sharpen, shown on top of the development.
 Crop (top bar): applied to the view and the saved file; kept per photo, not in presets.
 Batch… (top bar): one preset over a whole folder (see batch.py).
 Library (G) / Edit (E): browse folders with thumbnails and a preview (browser.py),
 open a photo in the editor.
+Keep edits with photo (Ctrl+K): a sidecar file next to it (sidecar.py), read
+back when the photo is opened again.
 Each AI model runs at most once per photo; its result is kept and the dials
 are applied on top (see pipeline.py), so only a new photo re-runs the AI.
 """
@@ -23,8 +25,8 @@ from typing import Callable
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QIcon, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QObject, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -54,7 +56,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from . import batch, develop, engine, imageio, layers, pipeline, presets, redeye, segment
+from . import batch, develop, engine, imageio, layers, looks, pipeline, presets, redeye, segment, sidecar
 from .browser import LibraryView
 from .widgets import Histogram, PhotoView, ResetSlider
 
@@ -90,6 +92,7 @@ DEV_BW = [
     for name, _ in develop.BW_COLOURS for part in develop.BW_PARTS
 ]
 PCT = lambda v: f"{v}%"  # noqa: E731
+DEV_LOOK = [("lut_strength", "Strength", 0, 100, 100, PCT)]
 ENH_NR = [
     ("luminance", "Luminance noise", 0, 100, 85, PCT),
     ("color", "Colour noise", 0, 100, 100, PCT),
@@ -104,9 +107,10 @@ CROP_ASPECTS = [("Free", None), ("Original", "original"), ("1:1", 1.0), ("3:2", 
 RAW_KEYS = [s[0] for s in DEV_LIGHT + DEV_COLOUR]
 HDR_KEYS = [s[0] for s in DEV_HDR]
 BW_KEYS = [s[0] for s in DEV_BW]
-DEV_KEYS = RAW_KEYS + HDR_KEYS + BW_KEYS
+LOOK_KEYS = [s[0] for s in DEV_LOOK]
+DEV_KEYS = RAW_KEYS + HDR_KEYS + BW_KEYS + LOOK_KEYS
 ENH_KEYS = [s[0] for s in ENH_NR + ENH_SH]
-SLIDER_DEFAULTS = {s[0]: s[4] for s in DEV_LIGHT + DEV_COLOUR + DEV_HDR + DEV_BW + ENH_NR + ENH_SH}
+SLIDER_DEFAULTS = {s[0]: s[4] for s in DEV_LIGHT + DEV_COLOUR + DEV_HDR + DEV_BW + DEV_LOOK + ENH_NR + ENH_SH}
 
 GROUP_STYLE = (
     "QGroupBox { font-weight: bold; font-size: 11pt; margin-top: 8px; padding-top: 10px; }"
@@ -779,6 +783,9 @@ class MainWindow(QMainWindow):
         action(file_menu, "&Open photo…", self.open_dialog, "Ctrl+O")
         action(file_menu, "Open &folder in Library…", self.open_folder_dialog, "Ctrl+Shift+O")
         self.save_action = action(file_menu, "&Save…", lambda: self.save_btn.isEnabled() and self.save_dialog(), "Ctrl+S")
+        self.keep_action = action(file_menu, "&Keep edits with photo", self.keep_edits, "Ctrl+K")
+        self.keep_action.setToolTip("Write the edits to a small file next to the photo; they come back when you open it again")
+        self.keep_action.setEnabled(False)
         file_menu.addSeparator()
         action(file_menu, "&Batch…", batch_btn.click)
         file_menu.addSeparator()
@@ -866,6 +873,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout(self.hdr_group)
         for spec in DEV_HDR:
             self._add_slider(form, spec, self.dev_changed)
+        look = self._build_look_group()
         reset = QPushButton("Reset development")
         reset.clicked.connect(self.reset_development)
         tab = QWidget()
@@ -874,6 +882,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(light)
         lay.addWidget(colour)
         lay.addWidget(self.hdr_group)
+        lay.addWidget(look)
         lay.addWidget(reset)
         lay.addStretch(1)
         scroll = QScrollArea()  # so the dials stay reachable on small screens
@@ -881,6 +890,93 @@ class MainWindow(QMainWindow):
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(tab)
         return scroll
+
+    def _build_look_group(self) -> QGroupBox:
+        """Look: a colour LUT (.cube or Hald CLUT) over the developed photo."""
+        group = QGroupBox("Look (LUT)")
+        group.setToolTip(
+            "A colour look from a LUT file (.cube, or a Hald CLUT .png/.tif), applied after "
+            f"everything else. Put LUTs in {looks.LUT_DIR} to have them in the list."
+        )
+        win = self
+
+        class LutBox(QComboBox):
+            def showPopup(self):  # pick up files added to the folder meanwhile
+                win.refresh_luts()
+                super().showPopup()
+
+        self.lut_box = LutBox()
+        self.lut_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.lut_box.setMinimumContentsLength(12)
+        self.lut_box.currentIndexChanged.connect(self.lut_chosen)
+        pick = QPushButton("File…")
+        pick.setToolTip("Use a LUT file from anywhere")
+        pick.clicked.connect(self.pick_lut)
+        folder = QPushButton("Folder")
+        folder.setToolTip(f"Open the LUT folder ({looks.LUT_DIR})")
+        folder.clicked.connect(self.open_lut_folder)
+        row = QHBoxLayout()
+        row.addWidget(self.lut_box, 1)
+        row.addWidget(pick)
+        row.addWidget(folder)
+        form = QFormLayout(group)
+        form.addRow("LUT", row)
+        for spec in DEV_LOOK:
+            self._add_slider(form, spec, self.dev_changed)
+        self.lut_note = QLabel()
+        self.lut_note.setStyleSheet("color: #e08040;")
+        self.lut_note.setWordWrap(True)
+        self.lut_note.hide()
+        form.addRow(self.lut_note)
+        self.refresh_luts()
+        self.lut_chosen()
+        return group
+
+    def refresh_luts(self, select: str | None = None):
+        """Fill the LUT list: None, the files in the LUT folder, and the one in use
+        if it lives elsewhere (or is missing)."""
+        current = self.dev_params.get("lut", "") if select is None else select
+        names = looks.names()
+        self.lut_box.blockSignals(True)
+        self.lut_box.clear()
+        self.lut_box.addItem("None", "")
+        for n in names:
+            self.lut_box.addItem(looks.label(n), n)
+            self.lut_box.setItemData(self.lut_box.count() - 1, n, Qt.ItemDataRole.ToolTipRole)
+        if current and current not in names:
+            self.lut_box.addItem(looks.label(current), current)
+            self.lut_box.setItemData(self.lut_box.count() - 1, current, Qt.ItemDataRole.ToolTipRole)
+        self.lut_box.setCurrentIndex(max(0, self.lut_box.findData(current)))
+        self.lut_box.blockSignals(False)
+        if select is not None and self.dev_params.get("lut", "") != select:
+            self.lut_chosen()
+
+    def lut_chosen(self, _=None):
+        name = self.lut_box.currentData() or ""
+        msg = looks.problem(name)
+        self.lut_note.setText(msg or "")
+        self.lut_note.setVisible(bool(msg))
+        self.sliders["lut_strength"][0].setEnabled(bool(name))
+        if self.dev_params.get("lut", "") != name:
+            self.dev_params["lut"] = name
+            self._push_dev()
+
+    def pick_lut(self):
+        start = str(looks.LUT_DIR if looks.LUT_DIR.is_dir() else Path.home())
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a LUT", start,
+                                              "LUTs (*.cube *.CUBE *.png *.PNG *.tif *.tiff *.TIF *.TIFF)")
+        if not path:
+            return
+        try:
+            looks.read(Path(path))
+        except Exception as e:
+            QMessageBox.warning(self, "Not a usable LUT", f"{Path(path).name}: {e}")
+            return
+        self.refresh_luts(select=looks.setting_name(Path(path)))
+
+    def open_lut_folder(self):
+        looks.LUT_DIR.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(looks.LUT_DIR)))
 
     def _show_shot(self, photo: imageio.Photo):
         head, rows = imageio.describe_shot(photo.meta.get("shot", {}))
@@ -1401,8 +1497,9 @@ class MainWindow(QMainWindow):
             self.sliders[key][0].setValue(SLIDER_DEFAULTS[key])
 
     def reset_development(self):
-        self._reset(RAW_KEYS + HDR_KEYS)
+        self._reset(RAW_KEYS + HDR_KEYS + LOOK_KEYS)
         self.hdr_group.setChecked(bool(develop.DEFAULTS["hdr"]))
+        self.refresh_luts(select=develop.DEFAULTS["lut"])
 
     def dev_changed(self, key: str, value: float):
         self.dev_params[key] = value
@@ -1681,6 +1778,7 @@ class MainWindow(QMainWindow):
                 set_slider(key, dev.get(key, develop.DEFAULTS[key]))
             self.hdr_group.setChecked(bool(dev.get("hdr", develop.DEFAULTS["hdr"])))
             self.bw_group.setChecked(bool(dev.get("bw", develop.DEFAULTS["bw"])))
+            self.refresh_luts(select=str(dev.get("lut", develop.DEFAULTS["lut"]) or ""))
             enh = s.get("enhancement", {})
             for group, box, section in (
                 (self.nr_group, self.denoise_box, enh.get("noise_reduction", {})),
@@ -1741,6 +1839,96 @@ class MainWindow(QMainWindow):
         presets.delete(name)
         self.refresh_presets()
 
+    # --- edits kept with the photo (sidecar.py) -------------------------
+    def edit_state(self) -> dict:
+        """The open photo's whole edit, as written to its sidecar."""
+        spots = self.view.spots if self.re_group.isChecked() else self.redeye_kept
+        return {
+            "photo": self.photo.path.name,
+            "settings": self.settings(),
+            "crop": [int(v) for v in self.view.crop] if self.view.crop else None,
+            "layers": [{
+                "name": L.name, "settings": st, "visible": L.visible, "invert": L.invert,
+                "feather": float(L.feather), "opacity": float(L.opacity),
+                "points": [[float(v) for v in p] for p in L.points],
+                "ai": sidecar.pack(L.ai), "paint": sidecar.pack(L.paint),
+            } for L, st in zip(self.layers, self._all_settings()[1:])],
+            "red_eye_searched": self.redeye_found is not None,
+            "red_eye": [{
+                "x0": int(sp.x0), "y0": int(sp.y0), "cx": float(sp.cx), "cy": float(sp.cy),
+                "radius": float(sp.radius), "mask": sidecar.pack(sp.mask), "dark": sidecar.pack(sp.dark),
+            } for sp in spots],
+        }
+
+    def _has_edits(self) -> bool:
+        return bool(self.view.crop or self.layers
+                    or not self._same_settings(self.settings(), self.default_settings()))
+
+    def keep_edits(self) -> bool:
+        """Write the edit next to the photo (no edit: remove the file)."""
+        if self.photo is None:
+            return False
+        try:
+            if self._has_edits():
+                p = sidecar.write(self.photo.path, self.edit_state())
+                self.status.setText(f"Edits kept with the photo ({p.name})")
+            else:
+                sidecar.remove(self.photo.path)
+                self.status.setText("No edits to keep: the photo is as shot")
+            return True
+        except OSError as e:
+            QMessageBox.warning(self, "Could not keep edits",
+                                f"Couldn't write {sidecar.path_for(self.photo.path)}:\n{e}")
+            return False
+
+    def _restore_edits(self, photo: imageio.Photo) -> bool:
+        """Open the photo as it was left, if it has a sidecar."""
+        try:
+            data = sidecar.read(photo.path)
+        except Exception as e:
+            self.status.setText(f"Kept edits not read: {e}")
+            return False
+        if data is None:
+            return False
+        h, w = photo.linear.shape[:2]
+        spots = tuple(redeye.Spot(int(d["x0"]), int(d["y0"]), sidecar.unpack(d["mask"]), sidecar.unpack(d["dark"]),
+                                  float(d["cx"]), float(d["cy"]), float(d["radius"]))
+                      for d in data.get("red_eye", []))
+        if data.get("red_eye_searched"):
+            self.redeye_found = spots  # no new search; Find again goes back to these
+        self.redeye_kept = spots
+        self.apply_settings(data["settings"], run_pipeline=False)
+        if self.re_group.isChecked():
+            self.view.set_spots(spots)
+        if data.get("crop"):
+            self.view.set_crop(tuple(data["crop"]))
+        work = segment.work_shape(h, w)
+
+        def fits(a):
+            return a if a is not None and a.shape == tuple(work) else None
+
+        for d in data.get("layers", []):
+            st = copy.deepcopy(d["settings"])
+            st["development"] = {**develop.DEFAULTS, **st.get("development", {})}
+            paint = fits(sidecar.unpack(d.get("paint")))
+            L = layers.Layer(d["name"], st, work, (h, w), visible=bool(d.get("visible", True)),
+                             invert=bool(d.get("invert", False)), feather=float(d.get("feather", 0.0)),
+                             opacity=float(d.get("opacity", 1.0)), points=[tuple(p) for p in d.get("points", [])],
+                             ai=fits(sidecar.unpack(d.get("ai"))),
+                             paint=None if paint is None else paint.astype(np.int8))
+            self.layers.append(L)
+            item = QListWidgetItem(L.name)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked if L.visible else Qt.CheckState.Unchecked)
+            self.layer_list.blockSignals(True)
+            self.layer_list.addItem(item)
+            self.layer_list.blockSignals(False)
+        if self.layers:
+            self.view.set_stack(self._stack())
+        self._layer_controls()
+        self.status.setText(f"Opened with the edits kept in {sidecar.path_for(photo.path).name}")
+        return True
+
     # --- open / process -------------------------------------------------
     def open_dialog(self):
         exts = " ".join(f"*{e} *{e.upper()}" for e in sorted(imageio.ALL_EXTS))
@@ -1768,23 +1956,46 @@ class MainWindow(QMainWindow):
             return True
 
     def _leave_photo(self) -> bool:
-        """Before another photo replaces the open one: offer to keep the settings
-        as a preset, then reset everything. False = stay on this photo."""
-        if self._settings_unsaved():
-            answer = QMessageBox.question(
-                self,
-                "Save preset?",
-                f"Save the settings used on {self.photo.path.name} as a preset before opening "
-                "the next photo?\n\nAll settings are reset to their defaults for the new photo.",
-                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Save,
-            )
-            if answer == QMessageBox.StandardButton.Cancel:
-                return False
-            if answer == QMessageBox.StandardButton.Save and not self.save_preset():
-                return False  # name dialog cancelled: keep everything as it was
+        """Before another photo replaces the open one (or Freeroom quits): offer to
+        keep the edits with the photo or as a preset, then reset everything.
+        False = stay on this photo."""
+        kept = sidecar.path_for(self.photo.path).exists()
+        if kept:
+            ask = not sidecar.same(self.photo.path, self.edit_state())
+        else:  # settings that are a preset as they are, and nothing else, need no question
+            ask = bool(self.view.crop or self.layers) or self._settings_unsaved()
+        if ask:
+            choice = self._ask_keep(kept)
+            if choice == "keep":
+                if not self.keep_edits():
+                    return False
+            elif choice == "preset":
+                if not self.save_preset():
+                    return False  # name dialog cancelled: keep everything as it was
+            elif choice != "discard":
+                return False  # Cancel or closed
         self.reset_all_settings(run_pipeline=False)  # the new photo starts the AI if needed
         return True
+
+    def _ask_keep(self, kept: bool) -> str:
+        """The leave-photo question: "keep", "preset", "discard" or "cancel"."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Keep edits?")
+        box.setText(f"Keep the edits of {self.photo.path.name}?")
+        box.setInformativeText(
+            "Keep with photo: everything (settings, look, crop, layers) goes in a small file "
+            f"next to it ({sidecar.path_for(self.photo.path).name}) and comes back when you "
+            "open it again.\nSave as preset: only the settings, to use on other photos."
+            + ("\n\nDiscard: the photo keeps the edits it had kept before." if kept else "")
+        )
+        keep_btn = box.addButton("Keep with photo", QMessageBox.ButtonRole.AcceptRole)
+        preset_btn = box.addButton("Save as preset…", QMessageBox.ButtonRole.AcceptRole)
+        discard_btn = box.addButton(QMessageBox.StandardButton.Discard)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(keep_btn)
+        box.exec()
+        return {keep_btn: "keep", preset_btn: "preset", discard_btn: "discard"}.get(box.clickedButton(), "cancel")
 
     def open_path(self, path: Path):
         """Start loading a photo (in the editor); on_loaded takes over when it's decoded."""
@@ -1827,6 +2038,7 @@ class MainWindow(QMainWindow):
         self.started.clear()
         self.save_target = None
         self.save_btn.setEnabled(True)
+        self.keep_action.setEnabled(True)
         h, w, _ = photo.linear.shape
         kind = f"RAW, base exposure +{photo.baseline_ev:.2f} EV" if photo.meta.get("raw") else f"{photo.meta.get('bits')}-bit"
         self.setWindowTitle(f"Freeroom — {path.name} ({w}×{h}, {kind})")
@@ -1835,6 +2047,7 @@ class MainWindow(QMainWindow):
         self.redeye_btn.setChecked(False)
         self.redeye_found, self.redeye_kept = None, ()
         self.view.set_linear(photo.linear, photo.baseline_ev, self.g)
+        self._restore_edits(photo)
         if self.re_group.isChecked():
             self._redeye_search()
         self._set_redeye_controls()
@@ -2108,6 +2321,9 @@ class MainWindow(QMainWindow):
             self.open_path(Path(urls[0]))
 
     def closeEvent(self, e):
+        if self.photo is not None and not self._leave_photo():
+            e.ignore()
+            return
         self.worker.cancel = True
         self.thread.quit()
         self.thread.wait(5000)

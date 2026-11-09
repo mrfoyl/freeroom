@@ -59,14 +59,37 @@ folder. RAW thumbnails and previews use the JPEG the camera embedded in the
 file, so they're quick (about 80 ms per photo the first time on a USB drive;
 thumbnails are cached in `~/.cache/freeroom/thumbs`, on a Mac in
 `~/Library/Caches/freeroom/thumbs`). Photo folders are only
-read, never written. The **File** menu has Open photo (Ctrl+O), Open folder in
-Library (Ctrl+Shift+O), Save (Ctrl+S), Batch and Quit.
+read; the one thing ever written there is a photo's kept edits, when you ask
+for it. The **File** menu has Open photo (Ctrl+O), Open folder in
+Library (Ctrl+Shift+O), Save (Ctrl+S), Keep edits with photo (Ctrl+K), Batch and Quit.
+
+**Look (LUT)** (Raw tab): a colour look from a LUT file, applied after all
+other development (also on layers, which can each have their own), with a
+**Strength** slider. It reads `.cube` files (3D or 1D, as made by Resolve,
+Photoshop and most LUT packs) and Hald CLUT images (`.png` / `.tif`, the
+format of RawTherapee's free film simulation collection). LUTs in
+`~/.config/freeroom/luts/` (subfolders too; **Folder** opens it) are listed
+by name; **File…** uses one from anywhere. The LUT is part of presets: by
+name for LUTs in that folder, so a preset works on another computer that has
+the same LUTs there, by full path for others. Use LUTs made for normal
+(sRGB / Rec.709) pictures; camera "log" LUTs (S-Log3, F-Log, V-Log…) expect
+log video and make a photo look wrong. A LUT that's missing or can't be read
+is skipped with a note under it, and a batch that needs it refuses to start.
+
+**Edits kept with the photo** (File › Keep edits with photo, Ctrl+K): the
+photo's whole edit — every setting including the look, the crop, the layers
+with their selections and the red-eye fixes — goes in a small JSON file next
+to it (`IMG_1234.CR2` gets `IMG_1234.CR2.freeroom.json`; a few kB, more with
+layers). The photo itself is never changed. Opening a photo that has one
+shows it as it was left, ready to edit further or save. Like a RAW + XMP
+sidecar in Lightroom or darktable, the two files belong together when you
+copy or move them. Keeping a photo with no edits removes the file.
 
 **Crop** (top bar, or `C`): drag the frame, its handles, or a new frame on the
 whole photo; pick an aspect ratio (Free, Original, 1:1, 3:2, 4:3, 5:4, 16:9;
 ⇄ swaps portrait / landscape). Enter applies, Esc undoes the changes. The view,
 loupe, histogram and saved file then show only the cropped part. The crop is
-kept per photo and isn't part of presets.
+kept per photo (in the edits kept with it) and isn't part of presets.
 
 **Layers** (folded above the tabs; click the header to open): **New layer** adds a layer that starts as a
 copy of the Base (the whole photo) and applies only inside its selection.
@@ -89,8 +112,9 @@ answers each click in a fraction of a second):
   layer. Enter or Esc leaves a tool. Hover a layer in the list to see its
   area on the photo.
 
-Layers belong to the photo: they're in the saved file, but not in presets or
-batches, and opening another photo drops them. Presets are always the Base's.
+Layers belong to the photo: they're in the saved file and in the edits kept
+with it, but not in presets or batches; opening another photo drops them
+unless they're kept. Presets are always the Base's.
 
 **Batch…** (top bar): process a whole folder with a preset (or the current
 settings): pick the input and output folder, the format (JPEG, 16-bit TIFF or
@@ -119,9 +143,12 @@ The RGB range view (histogram) above the tabs shows the current result, with
 clip markers and a note when a RAW has highlight data past white.
 
 **Opening another photo** (drop, Open…, Library) starts it from the default
-settings. If the current settings aren't the defaults or the selected preset,
-Freeroom first asks whether to save them as a preset (Save / Discard /
-Cancel; Cancel keeps the current photo). **Reset development** also switches
+settings, or from its kept edits. If the current photo has edits that aren't
+kept (settings that aren't the defaults or the selected preset, a crop or
+layers, or changes since they were kept), Freeroom first asks: **Keep with
+photo** (writes its sidecar), **Save as preset…** (the settings only),
+**Discard** or **Cancel** (stays on the current photo). Quitting asks the
+same. **Reset development** also switches
 HDR tone mapping off.
 
 Presets (all settings of both tabs) are JSON files in
