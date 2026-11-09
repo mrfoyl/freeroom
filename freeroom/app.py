@@ -590,6 +590,13 @@ class MainWindow(QMainWindow):
         self.save_btn = QPushButton("Save…")
         self.save_btn.setEnabled(False)
         self.save_btn.clicked.connect(self.save_dialog)
+        self.keep_btn = QPushButton("Keep edits")
+        self.keep_btn.setToolTip(
+            "Keep the edits with the photo (Ctrl+K): settings, look, crop and layers go in a small "
+            "file next to it (photo name + .freeroom.json) and come back when you open it again"
+        )
+        self.keep_btn.setEnabled(False)
+        self.keep_btn.clicked.connect(self.keep_edits)
 
         self.preset_box = QComboBox()
         self.preset_box.setMinimumWidth(180)
@@ -652,10 +659,10 @@ class MainWindow(QMainWindow):
         preset_label = QLabel("   Preset:")
         crop_gap = QLabel("   ")
         # shown only in Edit mode (hidden widgets' shortcuts, like C for crop, don't fire)
-        self.edit_only = [self.save_btn, preset_label, self.preset_box, save_preset, del_preset,
+        self.edit_only = [self.save_btn, self.keep_btn, preset_label, self.preset_box, save_preset, del_preset,
                           crop_gap, self.crop_btn, self.aspect_box, self.aspect_flip, self.crop_reset]
         top = QHBoxLayout()
-        for w in (self.library_btn, self.edit_btn, QLabel("  "), open_btn, self.save_btn, preset_label,
+        for w in (self.library_btn, self.edit_btn, QLabel("  "), open_btn, self.save_btn, self.keep_btn, preset_label,
                   self.preset_box, save_preset, del_preset, batch_btn, crop_gap, self.crop_btn,
                   self.aspect_box, self.aspect_flip, self.crop_reset):
             top.addWidget(w)
@@ -789,6 +796,8 @@ class MainWindow(QMainWindow):
             menu.addAction(a)
             return a
 
+        # in the window, also where the desktop would move menus elsewhere (KDE global menu)
+        self.menuBar().setNativeMenuBar(False)
         file_menu = self.menuBar().addMenu("&File")
         action(file_menu, "&Open photo…", self.open_dialog, "Ctrl+O")
         action(file_menu, "Open &folder in Library…", self.open_folder_dialog, "Ctrl+Shift+O")
@@ -2113,6 +2122,7 @@ class MainWindow(QMainWindow):
         self.save_target = None
         self.save_btn.setEnabled(True)
         self.keep_action.setEnabled(True)
+        self.keep_btn.setEnabled(True)
         h, w, _ = photo.linear.shape
         kind = f"RAW, base exposure +{photo.baseline_ev:.2f} EV" if photo.meta.get("raw") else f"{photo.meta.get('bits')}-bit"
         self.setWindowTitle(f"Freeroom — {path.name} ({w}×{h}, {kind})")

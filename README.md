@@ -88,7 +88,7 @@ fixes. A LUT starts from the finished picture, so highlights past white that
 Freeroom recovers from a RAW are already clipped there. The LUT expects
 photos looking as Freeroom shows them at default settings (sRGB / Rec.709).
 
-**Edits kept with the photo** (File › Keep edits with photo, Ctrl+K): the
+**Edits kept with the photo** (**Keep edits** in the top bar, File › Keep edits with photo, or Ctrl+K): the
 photo's whole edit — every setting including the look, the crop, the layers
 with their selections and the red-eye fixes — goes in a small JSON file next
 to it (`IMG_1234.CR2` gets `IMG_1234.CR2.freeroom.json`; a few kB, more with
