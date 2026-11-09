@@ -84,6 +84,23 @@ except ValueError as e:
     check("batch refuses a missing LUT", "not found" in str(e), str(e))
 check("batch takes a good LUT", batch.job_from_settings({"development": {"lut": "film/cool.cube"}}, {}).dev["lut"] == "film/cool.cube")
 
+# --- 2b. exporting settings as a LUT ------------------------------------------------
+neutral = develop.develop(lin, develop.DEFAULTS)
+looks_p = dict(develop.DEFAULTS, exposure=0.3, shadows=0.2, highlights=-0.3, contrast=0.25, midtones=0.1,
+               temperature=0.2, tint=-0.1, saturation=0.2, lut="film/cool.cube", lut_strength=0.6)
+bw_p = dict(develop.DEFAULTS, bw=True, bw_red=0.5, bw_blue=-0.6, bw_green_hi=0.4, contrast=0.3)
+for label, params, size, tol in (("colour settings", looks_p, 33, 0.004), ("B&W mix", bw_p, 65, 0.006)):
+    f = looks.write_cube(out / f"export_{size}.cube", develop.look_table(params, size), "Test look")
+    back = looks.read(f)
+    via = looks.apply(neutral, back)
+    err = np.abs(via - develop.develop(lin, params))
+    check(f"exported LUT ({label}, {size}) = Freeroom's own result", back.table.shape == (size,) * 3 + (3,)
+          and float(err.mean()) < tol and float(np.percentile(err, 99.9)) < 10 * tol,
+          f"(mean {err.mean():.4f}, 99.9% {np.percentile(err, 99.9):.4f})")
+check("default settings export as identity", np.abs(develop.look_table(develop.DEFAULTS, 17)
+      - looks.read(looks.LUT_DIR / "identity.cube").table).max() < 1e-4)
+check("HDR is left out of the LUT", np.array_equal(develop.look_table(dict(looks_p, hdr=True), 9), develop.look_table(looks_p, 9)))
+
 # --- 3. the app: Look section, keep edits, reopen -----------------------------------------
 src = [Path(p) for p in sys.argv[1:3]]
 photos = []
@@ -182,6 +199,17 @@ noref = develop.develop(win.photo.linear[y0:y1, x0:x1], dict(dev, lut=""), win.p
 far = (slice(0, (y1 - y0) // 8), slice(-(x1 - x0) // 8, None))  # corner away from the layer
 d_look, d_plain = np.abs(saved[far] - ref[far]).mean(), np.abs(saved[far] - noref[far]).mean()
 check("saved file has the look", d_look < 0.01 and d_plain > d_look * 2, f"(look {d_look:.4f}, without {d_plain:.4f})")
+
+exp_f = out / "exported look"
+win.hdr_group.setChecked(True)
+win.lut_size_box.setCurrentIndex(win.lut_size_box.findData(65))
+with mock.patch.object(appmod.QFileDialog, "getSaveFileName", return_value=(str(exp_f), "")):
+    win.export_lut()
+exp_c = exp_f.with_name(exp_f.name + ".cube")
+ok = exp_c.is_file() and looks.read(exp_c).table.shape[0] == 65
+check("Export as LUT writes the tabs' look", ok and np.abs(looks.read(exp_c).table
+      - develop.look_table(win.dev_params, 65)).max() < 1e-5 and "without HDR" in win.status.text(), win.status.text())
+win.hdr_group.setChecked(False)
 
 with mock.patch.object(appmod.MainWindow, "_ask_keep", return_value="discard"):
     win.reset_all_settings(); win.view.set_crop(None)

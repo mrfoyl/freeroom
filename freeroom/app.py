@@ -25,7 +25,7 @@ from typing import Callable
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, QSettings, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSlider,
+    QSplitter,
     QStackedWidget,
     QTabWidget,
     QVBoxLayout,
@@ -62,6 +63,7 @@ from .widgets import Histogram, PhotoView, ResetSlider
 
 SAVE_DIR = Path.home() / "Pictures" / "freeroom"
 ICON = Path(__file__).resolve().parent / "assets" / "freeroom.png"  # optional, gitignored
+SIDE_MIN, SIDE_DEFAULT, SIDE_MAX = 330, 400, 720  # side panel width (px), drag its edge
 MAX_RESULTS = 6  # AI results kept per photo (each is a full-size float image)
 
 # Slider specs: key, label, min, max, default (slider units = value * 100), display format
@@ -672,7 +674,9 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.enh_tab, "Enhancement")
         self.tabs.currentChanged.connect(self.tab_changed)
 
-        hint = QLabel(
+        # one line, the whole story on hover: the dials get the height
+        hint = QLabel("<b>Loupe</b> 100% · Hold mouse / Space: before · Scroll: loupe size")
+        hint.setToolTip(
             "<b>Loupe</b> = 100% (1 photo pixel = 1 screen pixel).<br>"
             "Hold mouse button: before, in loupe · Hold Space: before, everywhere · "
             "Scroll: loupe size.<br>"
@@ -689,15 +693,21 @@ class MainWindow(QMainWindow):
         side.addWidget(hint)
         side_w = QWidget()
         side_w.setLayout(side)
-        side_w.setFixedWidth(360)
+        side_w.setMinimumWidth(SIDE_MIN)
+        side_w.setMaximumWidth(SIDE_MAX)
         side_w.setStyleSheet(GROUP_STYLE)
 
-        body = QHBoxLayout()
-        body.setContentsMargins(0, 0, 0, 0)
-        body.addWidget(self.view, 1)
-        body.addWidget(side_w)
-        editor = QWidget()
-        editor.setLayout(body)
+        # the side panel's edge can be dragged; its width is remembered
+        self.ui_settings = QSettings("freeroom", "freeroom")
+        editor = QSplitter(Qt.Orientation.Horizontal)
+        editor.addWidget(self.view)
+        editor.addWidget(side_w)
+        editor.setChildrenCollapsible(False)
+        editor.setStretchFactor(0, 1)
+        editor.setStretchFactor(1, 0)
+        editor.splitterMoved.connect(lambda *_: self.ui_settings.setValue("side_width", editor.sizes()[1]))
+        self.editor_split = editor
+        self._side_sized = False  # the saved width is set once the editor is first laid out
 
         self.library = LibraryView()
         self.library.open_photo.connect(self.open_from_library)
@@ -796,6 +806,8 @@ class MainWindow(QMainWindow):
 
     def set_mode(self, edit: bool):
         self.pages.setCurrentIndex(1 if edit else 0)
+        if edit and not self._side_sized:
+            QTimer.singleShot(0, self._size_side)
         (self.edit_btn if edit else self.library_btn).setChecked(True)
         for w in self.edit_only:
             w.setVisible(edit)
@@ -808,6 +820,19 @@ class MainWindow(QMainWindow):
                 self.crop_btn.setChecked(False)
             self.redeye_btn.setChecked(False)
             self.library.grid.setFocus()
+
+    def _size_side(self):
+        """The side panel at its remembered width (the splitter has a real size now)."""
+        total = sum(self.editor_split.sizes())
+        if self._side_sized or total <= 0 or not self.editor_split.isVisible():
+            return
+        self._side_sized = True
+        try:
+            side = int(self.ui_settings.value("side_width", SIDE_DEFAULT))
+        except (TypeError, ValueError):
+            side = SIDE_DEFAULT
+        side = min(max(side, SIDE_MIN), SIDE_MAX)
+        self.editor_split.setSizes([max(1, total - side), side])
 
     def open_folder_dialog(self):
         start = str(self.library.folder or Path.home() / "Pictures")
@@ -836,6 +861,7 @@ class MainWindow(QMainWindow):
             on_change(key, v / 100)
 
         s.valueChanged.connect(changed)
+        form.setVerticalSpacing(2)  # many dials: keep them close, the panel is short
         row = QHBoxLayout()
         row.addWidget(s)
         row.addWidget(val)
@@ -888,6 +914,7 @@ class MainWindow(QMainWindow):
         scroll = QScrollArea()  # so the dials stay reachable on small screens
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(tab)
         return scroll
 
@@ -907,12 +934,14 @@ class MainWindow(QMainWindow):
 
         self.lut_box = LutBox()
         self.lut_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.lut_box.setMinimumContentsLength(12)
+        self.lut_box.setMinimumContentsLength(6)
         self.lut_box.currentIndexChanged.connect(self.lut_chosen)
-        pick = QPushButton("File…")
+        pick = QToolButton()
+        pick.setText("File…")
         pick.setToolTip("Use a LUT file from anywhere")
         pick.clicked.connect(self.pick_lut)
-        folder = QPushButton("Folder")
+        folder = QToolButton()
+        folder.setText("Folder")
         folder.setToolTip(f"Open the LUT folder ({looks.LUT_DIR})")
         folder.clicked.connect(self.open_lut_folder)
         row = QHBoxLayout()
@@ -928,6 +957,21 @@ class MainWindow(QMainWindow):
         self.lut_note.setWordWrap(True)
         self.lut_note.hide()
         form.addRow(self.lut_note)
+        export = QPushButton("Export as LUT…")
+        export.setToolTip(
+            "Save the Raw and B&W settings shown in the tabs (and the LUT above) as a .cube LUT, "
+            "to use the look in other programs. HDR can't go in a LUT, and highlights past "
+            "white that Freeroom recovers from a RAW are clipped in a LUT's input."
+        )
+        export.clicked.connect(self.export_lut)
+        self.lut_size_box = QComboBox()
+        for size, text in ((33, "33 (standard)"), (65, "65 (finer)")):
+            self.lut_size_box.addItem(text, size)
+        self.lut_size_box.setToolTip("Steps per colour: 33 suits nearly every program, 65 follows strong curves more closely")
+        row = QHBoxLayout()
+        row.addWidget(export, 1)
+        row.addWidget(self.lut_size_box)
+        form.addRow(row)
         self.refresh_luts()
         self.lut_chosen()
         return group
@@ -974,6 +1018,30 @@ class MainWindow(QMainWindow):
             return
         self.refresh_luts(select=looks.setting_name(Path(path)))
 
+    def export_lut(self):
+        """The tabs' development settings (Base, or the layer being edited) as a .cube."""
+        params = dict(self.dev_params)
+        name = (self.preset_box.currentData() or "Freeroom look").replace("/", "_")
+        SAVE_DIR.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(self, "Export look as LUT", str(SAVE_DIR / f"{name}.cube"),
+                                              "Cube LUT (*.cube)")
+        if not path:
+            return
+        out = Path(path)
+        if out.suffix.lower() != ".cube":
+            out = out.with_name(out.name + ".cube")
+        try:
+            looks.write_cube(out, develop.look_table(params, self.lut_size_box.currentData()), out.stem)
+        except Exception as e:
+            QMessageBox.warning(self, "Could not export LUT", f"{out}: {e}")
+            return
+        left_out = []
+        if params.get("hdr"):
+            left_out.append("HDR tone mapping")
+        if params.get("lut") and looks.problem(params["lut"]):
+            left_out.append(f"the LUT “{looks.label(params['lut'])}” (can't be read)")
+        self.status.setText(f"Look exported to {out}" + (f" — without {' and '.join(left_out)}" if left_out else ""))
+
     def open_lut_folder(self):
         looks.LUT_DIR.mkdir(parents=True, exist_ok=True)
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(looks.LUT_DIR)))
@@ -983,7 +1051,13 @@ class MainWindow(QMainWindow):
         h, w, _ = photo.linear.shape
         rows.append(("Size", f"{w}×{h} ({w * h / 1e6:.1f} MP)"))
         self.shot_head.setText(head or "No exposure data in this file")
-        self.shot_rows.setText(
+        # compact: camera and lens on their own lines, the rest flowing after them,
+        # so the dials below get the height; the full table on hover
+        grey = "<span style='color:#888'>{}</span>"
+        own = [v for k, v in rows if k in ("Camera", "Lens")]
+        rest = " · ".join(f"{grey.format(k)} {v}" for k, v in rows if k not in ("Camera", "Lens"))
+        self.shot_rows.setText("<br>".join(own + ([rest] if rest else [])))
+        self.shot_rows.setToolTip(
             "<table cellspacing='0' cellpadding='1'>"
             + "".join(f"<tr><td style='color:#888; padding-right:8px'>{k}</td><td>{v}</td></tr>" for k, v in rows)
             + "</table>"

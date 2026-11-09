@@ -162,6 +162,19 @@ def problem(name: str) -> str | None:
         return f"LUT “{label(name)}”: {e}"
 
 
+def write_cube(path: Path, table: np.ndarray, title: str = "") -> Path:
+    """Write a 3D table (n, n, n, 3), indexed [b, g, r], as a .cube file."""
+    n = table.shape[0]
+    rows = table.reshape(-1, 3)  # red changes fastest, as .cube wants
+    head = [f'TITLE "{title.replace(chr(34), "")}"'] if title else []
+    head += ["# Made by Freeroom: display sRGB in and out", f"LUT_3D_SIZE {n}",
+             "DOMAIN_MIN 0.0 0.0 0.0", "DOMAIN_MAX 1.0 1.0 1.0"]
+    body = "\n".join(f"{r:.6f} {g:.6f} {b:.6f}" for r, g, b in rows.tolist())
+    path = Path(path)
+    path.write_text("\n".join(head) + "\n" + body + "\n")
+    return path
+
+
 # --- applying -----------------------------------------------------------------
 _atlases: dict[int, np.ndarray] = {}
 

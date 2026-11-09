@@ -76,6 +76,18 @@ the same LUTs there, by full path for others. Use LUTs made for normal
 log video and make a photo look wrong. A LUT that's missing or can't be read
 is skipped with a note under it, and a batch that needs it refuses to start.
 
+**Export as LUT…** (Look section) saves the settings shown in the tabs (the
+Base's, or the layer being edited) as a `.cube` LUT, to use the look in
+Resolve, Premiere, Photoshop, Affinity or a phone editor. Size 33 suits
+nearly every program; 65 follows strong curves more closely. It holds
+exposure, white balance, tone, contrast, saturation, the B&W mix and the LUT
+picked above (at its strength); on a normal photo it matches Freeroom's own
+result to a fraction of an 8-bit step. Left out: HDR tone mapping (it works
+area by area, which a LUT can't), the AI steps, layers, crop and red-eye
+fixes. A LUT starts from the finished picture, so highlights past white that
+Freeroom recovers from a RAW are already clipped there. The LUT expects
+photos looking as Freeroom shows them at default settings (sRGB / Rec.709).
+
 **Edits kept with the photo** (File › Keep edits with photo, Ctrl+K): the
 photo's whole edit — every setting including the look, the crop, the layers
 with their selections and the red-eye fixes — goes in a small JSON file next
@@ -140,7 +152,9 @@ by unticking the running sections. Saving while a step runs asks whether to
 **wait** and save when it's done.
 
 The RGB range view (histogram) above the tabs shows the current result, with
-clip markers and a note when a RAW has highlight data past white.
+clip markers and a note when a RAW has highlight data past white. The side panel's
+left edge can be dragged to make it wider or narrower (330–720 px; the width
+is remembered). The loupe help under it shows in full on hover.
 
 **Opening another photo** (drop, Open…, Library) starts it from the default
 settings, or from its kept edits. If the current photo has edits that aren't

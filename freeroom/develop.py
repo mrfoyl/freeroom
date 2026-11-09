@@ -238,6 +238,29 @@ def develop(
     return out
 
 
+# Settings a LUT can't hold: HDR works area by area, not colour by colour
+NOT_IN_LUT = ("hdr",)
+
+
+def look_table(params: dict, size: int = 33) -> np.ndarray:
+    """These settings as a 3D LUT (size³, indexed [b, g, r]) from the photo as
+    developed at the defaults (display sRGB) to the photo developed with them.
+
+    Development is per-pixel apart from HDR (left out), and at the defaults it
+    is just the sRGB encoding of the exposed linear data, clipped. So decoding
+    a neutral sRGB value gives linear data that develops (at base exposure 0)
+    exactly like the photo's pixels that show that value. What can't come back
+    is data past white: the LUT sees it clipped."""
+    p = dict(params)
+    for key in NOT_IN_LUT:
+        p[key] = DEFAULTS[key]
+    g = np.linspace(0.0, 1.0, size, dtype=np.float32)
+    b, gg, r = np.meshgrid(g, g, g, indexing="ij")
+    neutral = np.stack([r, gg, b], axis=-1).reshape(size * size, size, 3)
+    out = develop(srgb_to_linear(neutral), p, 0.0)
+    return np.clip(out, 0.0, 1.0).reshape(size, size, size, 3)
+
+
 def beyond_white(linear: np.ndarray, params: dict, baseline_ev: float = 0.0) -> float:
     """Fraction of pixels with a channel past white before tone mapping, i.e.
     highlight data that is clipped at Highlights 0 and can be pulled back."""
