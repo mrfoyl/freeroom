@@ -12,6 +12,12 @@ Three tabs, applied in this order:
    tint, saturation. RAW files load scene-linear (rawpy, camera WB) with an
    automatic base exposure; Highlights left rolls RAW data past white back
    into range. Per-pixel only, so it's instant. A JPEG at defaults is unchanged.
+   Under them a folded **Colour mixer** (click its header to open): for
+   eight colours (red, orange, yellow, green, aqua, blue, purple, magenta)
+   a **Hue** slider that turns that colour (±30°, e.g. red towards orange or
+   magenta), plus **Saturation** and **Luminance** pages; greys stay as they
+   are, and the header says "in use" while any slider is moved. It also
+   works per layer and goes into exported LUTs; black & white has its own mixer.
    Below the dials, an **HDR tone mapping** section (off by default):
    single-photo local tone mapping. Compression pulls the large-scale
    brightness towards mid grey (shadows up, highlights down), Local detail

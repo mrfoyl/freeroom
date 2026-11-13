@@ -93,6 +93,15 @@ DEV_BW = [
      -100, 100, 0, lambda v: f"{v:+d}")
     for name, _ in develop.BW_COLOURS for part in develop.BW_PARTS
 ]
+# Colour mixer: per colour, Hue (±30°), Saturation and Luminance; one page each
+HSL_PAGES = [("hue", "Hue", lambda v: f"{v * develop.HSL_HUE / 100:+.0f}°"),
+             ("sat", "Saturation", lambda v: f"{v:+d}"),
+             ("lum", "Luminance", lambda v: f"{v:+d}")]
+DEV_HSL = {
+    part: [(f"hsl_{name}_{part}", f"<span style='color:{BW_SWATCH[name]}'>■</span> {name.capitalize()}",
+            -100, 100, 0, fmt) for name, _ in develop.BW_COLOURS]
+    for part, _, fmt in HSL_PAGES
+}
 PCT = lambda v: f"{v}%"  # noqa: E731
 DEV_LOOK = [("lut_strength", "Strength", 0, 100, 100, PCT)]
 ENH_NR = [
@@ -110,9 +119,11 @@ RAW_KEYS = [s[0] for s in DEV_LIGHT + DEV_COLOUR]
 HDR_KEYS = [s[0] for s in DEV_HDR]
 BW_KEYS = [s[0] for s in DEV_BW]
 LOOK_KEYS = [s[0] for s in DEV_LOOK]
-DEV_KEYS = RAW_KEYS + HDR_KEYS + BW_KEYS + LOOK_KEYS
+HSL_KEYS = [s[0] for specs in DEV_HSL.values() for s in specs]
+DEV_KEYS = RAW_KEYS + HSL_KEYS + HDR_KEYS + BW_KEYS + LOOK_KEYS
 ENH_KEYS = [s[0] for s in ENH_NR + ENH_SH]
-SLIDER_DEFAULTS = {s[0]: s[4] for s in DEV_LIGHT + DEV_COLOUR + DEV_HDR + DEV_BW + DEV_LOOK + ENH_NR + ENH_SH}
+SLIDER_DEFAULTS = {s[0]: s[4] for s in DEV_LIGHT + DEV_COLOUR + DEV_HDR + DEV_BW + DEV_LOOK + ENH_NR + ENH_SH
+                   + [spec for specs in DEV_HSL.values() for spec in specs]}
 
 GROUP_STYLE = (
     "QGroupBox { font-weight: bold; font-size: 11pt; margin-top: 8px; padding-top: 10px; }"
@@ -899,6 +910,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout(colour)
         for spec in DEV_COLOUR:
             self._add_slider(form, spec, self.dev_changed)
+        mixer = self._build_hsl_section()
         self.hdr_group = self._dev_group("HDR tone mapping", "hdr")
         self.hdr_group.setToolTip(
             "Squeezes a high-contrast scene into the picture: Compression lifts shadows and "
@@ -916,6 +928,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(shot)
         lay.addWidget(light)
         lay.addWidget(colour)
+        lay.addWidget(mixer)
         lay.addWidget(self.hdr_group)
         lay.addWidget(look)
         lay.addWidget(reset)
@@ -926,6 +939,60 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(tab)
         return scroll
+
+    def _build_hsl_section(self) -> QWidget:
+        """Colour mixer (hue / saturation / luminance per colour), folded at start."""
+        self.hsl_toggle = QToolButton()
+        self.hsl_toggle.setCheckable(True)
+        self.hsl_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.hsl_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.hsl_toggle.setAutoRaise(True)
+        self.hsl_toggle.setStyleSheet("QToolButton { font-weight: bold; font-size: 11pt; border: none; }")
+        self.hsl_toggle.setToolTip("Turn, strengthen or brighten single colours: e.g. bluer sky, greener grass, warmer skin")
+        body = QGroupBox()
+        body.setVisible(False)
+        self.hsl_body = body
+        pages = QStackedWidget()
+        pick = QHBoxLayout()
+        pick.setSpacing(0)
+        group = QButtonGroup(body)
+        for i, (part, title, _) in enumerate(HSL_PAGES):
+            page = QWidget()
+            form = QFormLayout(page)
+            form.setContentsMargins(0, 4, 0, 0)
+            for spec in DEV_HSL[part]:
+                self._add_slider(form, spec, self.dev_changed)
+            pages.addWidget(page)
+            b = QPushButton(title)
+            b.setCheckable(True)
+            b.setChecked(i == 0)
+            b.clicked.connect(lambda _=False, i=i: pages.setCurrentIndex(i))
+            group.addButton(b)
+            pick.addWidget(b)
+        self.hsl_pages = pages
+        reset = QPushButton("Reset colour mixer")
+        reset.clicked.connect(lambda: self._reset(HSL_KEYS))
+        lay = QVBoxLayout(body)
+        lay.addLayout(pick)
+        lay.addWidget(pages)
+        lay.addWidget(reset)
+        self.hsl_toggle.toggled.connect(self._fold_hsl)
+        self._hsl_title()
+        panel = QWidget()
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(0, 6, 0, 0)
+        outer.setSpacing(2)
+        outer.addWidget(self.hsl_toggle)
+        outer.addWidget(body)
+        return panel
+
+    def _fold_hsl(self, open_: bool):
+        self.hsl_toggle.setArrowType(Qt.ArrowType.DownArrow if open_ else Qt.ArrowType.RightArrow)
+        self.hsl_body.setVisible(open_)
+
+    def _hsl_title(self):
+        used = any(self.dev_params.get(k) for k in HSL_KEYS)  # so a folded mixer still says it's on
+        self.hsl_toggle.setText("Colour mixer" + ("  ·  in use" if used else ""))
 
     def _build_look_group(self) -> QGroupBox:
         """Look: a colour LUT (.cube or Hald CLUT) over the developed photo."""
@@ -1580,12 +1647,14 @@ class MainWindow(QMainWindow):
             self.sliders[key][0].setValue(SLIDER_DEFAULTS[key])
 
     def reset_development(self):
-        self._reset(RAW_KEYS + HDR_KEYS + LOOK_KEYS)
+        self._reset(RAW_KEYS + HSL_KEYS + HDR_KEYS + LOOK_KEYS)
         self.hdr_group.setChecked(bool(develop.DEFAULTS["hdr"]))
         self.refresh_luts(select=develop.DEFAULTS["lut"])
 
     def dev_changed(self, key: str, value: float):
         self.dev_params[key] = value
+        if key.startswith("hsl_"):
+            self._hsl_title()
         self._push_dev()
 
     def enh_changed(self, key: str, value: float):

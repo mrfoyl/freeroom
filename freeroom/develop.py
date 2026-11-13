@@ -1,5 +1,5 @@
-"""Simple raw development: white balance, exposure, tone, contrast, saturation, plus
-HDR (local tone mapping), black & white (colour mixer) and a look (colour LUT).
+"""Simple raw development: white balance, exposure, tone, contrast, saturation,
+a colour mixer (hue / saturation / luminance per colour), plus HDR (local tone mapping), black & white (colour mixer) and a look (colour LUT).
 
 Works on scene-linear RGB (RAW files are loaded linear; JPEGs etc. are
 linearised on load) and outputs display sRGB in [0, 1]. Every step except HDR
@@ -48,6 +48,14 @@ for _name, _ in BW_COLOURS:
     for _part in BW_PARTS:
         DEFAULTS[f"bw_{_name}{_part}"] = 0.0
 BW_EV = 2.0  # a colour slider at ±1 moves that colour by ±2 EV in the grey image
+
+# Colour mixer (colour photos): per colour, its hue / saturation / luminance
+HSL_PARTS = ("hue", "sat", "lum")
+for _name, _ in BW_COLOURS:
+    for _part in HSL_PARTS:
+        DEFAULTS[f"hsl_{_name}_{_part}"] = 0.0
+HSL_HUE = 30.0  # a hue slider at ±1 turns that colour by ±30° (red towards magenta / orange)
+HSL_LUM = 0.6  # a luminance slider at ±1 scales that colour by 2^±0.6 (display values, ≈ ±1.3 EV)
 
 HDR_MAP_SIZE = 768  # long side of the low-res brightness map HDR works from
 HDR_ANCHOR = float(np.log2(0.18))  # compression pivots around mid grey
@@ -193,6 +201,39 @@ def _mono(x: np.ndarray, params: dict) -> np.ndarray:
     return np.repeat(grey[..., None], 3, axis=-1)
 
 
+def _hsl(out: np.ndarray, params: dict) -> np.ndarray | None:
+    """Colour mixer on display RGB: each colour's hue turned, its saturation and
+    luminance scaled. Colours between two sliders get a blend of both; greys
+    stay as they are. None when all sliders are at 0."""
+    tables = {part: [params.get(f"hsl_{n}_{part}", 0.0) for n, _ in BW_COLOURS] for part in HSL_PARTS}
+    if not any(any(v) for v in tables.values()):
+        return None
+    hsv = cv2.cvtColor(np.ascontiguousarray(out, dtype=np.float32), cv2.COLOR_RGB2HSV)  # H 0..360, S, V 0..1
+    hue, chroma = hsv[..., 0], hsv[..., 1]
+    idx = np.minimum(hue * 4, 1439).astype(np.int16)  # quarter-degree steps
+    hues = [h for _, h in BW_COLOURS] + [360]
+
+    def at(part):  # per pixel slider value, from a 1440-step table over the hue circle
+        v = tables[part]
+        if not any(v):
+            return None
+        return np.interp(np.arange(1440) / 4, hues, v + v[:1]).astype(np.float32)[idx]
+
+    x = out
+    dh = at("hue")
+    if dh is not None:  # same value and colourfulness, hue turned
+        hsv[..., 0] = (hue + np.float32(HSL_HUE) * dh) % 360
+        x = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+    ds = at("sat")
+    if ds is not None:  # around the colour's own brightness, like the Saturation slider
+        y = (x @ LUMA)[..., None]
+        x = y + (x - y) * (1 + ds * np.minimum(chroma * 4, 1))[..., None]
+    dl = at("lum")
+    if dl is not None:
+        x = x * np.exp2(np.float32(HSL_LUM) * dl * chroma)[..., None]
+    return np.clip(x, 0.0, 1.0)
+
+
 def build_lut(params: dict) -> np.ndarray:
     u = np.linspace(0.0, LUT_MAX_U, LUT_SIZE, dtype=np.float64)
     return _tone(linear_to_srgb(u * u), params).astype(np.float32)
@@ -222,6 +263,10 @@ def develop(
     np.sqrt(x, out=x)
     idx = np.minimum(x * ((LUT_SIZE - 1) / LUT_MAX_U), LUT_SIZE - 1).astype(np.int32)
     out = lut[idx]
+    if not params.get("bw"):
+        mixed = _hsl(out, params)
+        if mixed is not None:
+            out = mixed
     sat = params["saturation"]
     if sat:
         y = (out @ LUMA)[..., None]
